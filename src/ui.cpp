@@ -19,10 +19,10 @@ static ImVec4 blend(ImVec4 a, ImVec4 b, float t) {
     return {a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t, a.z+(b.z-a.z)*t, 1.f};
 }
 
-// ── NagraApp ──────────────────────────────────────────────────────────────────
-NagraApp::NagraApp()
+// ── CapstanApp ──────────────────────────────────────────────────────────────────
+CapstanApp::CapstanApp()
     : _window(sf::VideoMode(1280, 900),
-              "CapstanVar",
+              "CAPSTANVAR  ·  ANALOG TAPE SIMULATOR  ·  MODULAR DSP",
               sf::Style::Default),
       _engine(), _audio(_engine), _presets(), _renderer(_engine)
 {
@@ -36,7 +36,7 @@ NagraApp::NagraApp()
     _render_opts.normalize   = true;
 
     const char* home = std::getenv("HOME");
-    std::string rp   = home ? std::string(home)+"/.nagrav_recents" : ".nagrav_recents";
+    std::string rp   = home ? std::string(home)+"/.capstanvar_recents" : ".capstanvar_recents";
     FileDialog::recents.load(rp);
 
     auto pr = _presets.find_builtin("Ampex 456 (30ips)");
@@ -44,13 +44,13 @@ NagraApp::NagraApp()
     _audio.open();   // start DSP thread now; transport starts in Stopped/braking state
 }
 
-NagraApp::~NagraApp() {
+CapstanApp::~CapstanApp() {
     _audio.close();
     _renderer.cancel_all();
     _shutdown_imgui();
 }
 
-void NagraApp::run() {
+void CapstanApp::run() {
     sf::Clock clock;
     while (_window.isOpen()) {
         _process_events();
@@ -63,7 +63,7 @@ void NagraApp::run() {
 }
 
 // ── ImGui init ────────────────────────────────────────────────────────────────
-void NagraApp::_init_imgui() {
+void CapstanApp::_init_imgui() {
     (void)ImGui::SFML::Init(_window);
     ImGuiIO& io = ImGui::GetIO();
     // NavEnableKeyboard disabled: we handle all transport keys ourselves
@@ -71,7 +71,7 @@ void NagraApp::_init_imgui() {
     (void)ImGui::SFML::UpdateFontTexture();
 }
 
-void NagraApp::_apply_imgui_theme() {
+void CapstanApp::_apply_imgui_theme() {
     ImGuiStyle& s = ImGui::GetStyle();
     s.WindowRounding  = 0.f; s.ChildRounding   = 3.f;
     s.FrameRounding   = 3.f; s.GrabRounding    = 3.f;
@@ -109,10 +109,10 @@ void NagraApp::_apply_imgui_theme() {
     c[ImGuiCol_Separator]         = Col::border;
 }
 
-void NagraApp::_shutdown_imgui() { ImGui::SFML::Shutdown(); }
+void CapstanApp::_shutdown_imgui() { ImGui::SFML::Shutdown(); }
 
 // ── Events ────────────────────────────────────────────────────────────────────
-void NagraApp::_process_events() {
+void CapstanApp::_process_events() {
     sf::Event ev;
     while (_window.pollEvent(ev)) {
         ImGui::SFML::ProcessEvent(_window, ev);
@@ -194,25 +194,25 @@ void NagraApp::_process_events() {
 }
 
 // ── File dialog management ────────────────────────────────────────────────────
-void NagraApp::_open_load_audio() {
+void CapstanApp::_open_load_audio() {
     _fd_load_audio.open_load("Load Tape File",
         {".wav",".flac",".aif",".aiff",".ogg",".mp3"});
     _fd_pending = FDPending::LoadAudio;
 }
-void NagraApp::_open_load_preset() {
-    _fd_load_preset.open_load("Import Preset", {".ftsp",".json"});
+void CapstanApp::_open_load_preset() {
+    _fd_load_preset.open_load("Import Preset", {".cvpr",".json"});
     _fd_pending = FDPending::LoadPreset;
 }
-void NagraApp::_open_save_preset(const std::string& default_name) {
-    _fd_save_preset.open_save("Export Preset", default_name+".ftsp");
+void CapstanApp::_open_save_preset(const std::string& default_name) {
+    _fd_save_preset.open_save("Export Preset", default_name+".cvpr");
     _fd_pending = FDPending::SavePreset;
 }
-void NagraApp::_open_save_render() {
+void CapstanApp::_open_save_render() {
     _fd_save_render.open_save("Save Rendered File", "output.wav");
     _fd_pending = FDPending::SaveRender;
 }
 
-void NagraApp::_draw_file_dialogs() {
+void CapstanApp::_draw_file_dialogs() {
     switch (_fd_pending) {
     case FDPending::LoadAudio:
         if (_fd_load_audio.draw()) {
@@ -240,7 +240,7 @@ void NagraApp::_draw_file_dialogs() {
         if (_fd_save_preset.draw()) {
             std::string path = _fd_save_preset.result();
             if (!path.empty()) {
-                if (path.size()<5||path.substr(path.size()-5)!=".ftsp") path+=".ftsp";
+                if (path.size()<5||path.substr(path.size()-5)!=".cvpr") path+=".cvpr";
                 auto& b = _presets.builtin_presets();
                 std::string name=(_preset_idx>=0&&_preset_idx<(int)b.size())?b[_preset_idx].name:"Custom";
                 _presets.export_preset(path,name,_ui_params);
@@ -288,7 +288,7 @@ static constexpr float TRANSPORT_H = 118.f;  // reserved height for transport st
 static constexpr float HEADER_H    = 88.f;
 static constexpr float PRESETBAR_H = 34.f;
 
-void NagraApp::_draw_frame() {
+void CapstanApp::_draw_frame() {
     ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos({0,0});
     ImGui::SetNextWindowSize(io.DisplaySize);
@@ -327,7 +327,7 @@ void NagraApp::_draw_frame() {
 }
 
 // ── Compact header ────────────────────────────────────────────────────────────
-void NagraApp::_draw_header() {
+void CapstanApp::_draw_header() {
     float total_w = ImGui::GetContentRegionAvail().x;
 
     // ── Left: machine status ──────────────────────────────────────────────────
@@ -420,15 +420,15 @@ void NagraApp::_draw_header() {
         ImGui::SetCursorScreenPos({c0.x, c0.y+2});
         ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
         ImGui::SetWindowFontScale(1.4f);
-        float tw = ImGui::CalcTextSize("CapstanVar").x;
+        float tw = ImGui::CalcTextSize("CAPSTANVAR").x;
         ImGui::SetCursorPosX((mid_w-tw)*0.5f);
-        ImGui::Text("CapstanVar");
+        ImGui::Text("CAPSTANVAR");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, Col::grey);
-        float sw = ImGui::CalcTextSize("ANALOG FORENSICS").x;
+        float sw = ImGui::CalcTextSize("ANALOG TAPE SIMULATOR").x;
         ImGui::SetCursorPosX((mid_w-sw)*0.5f);
-        ImGui::Text("ANALOG FORENSICS");
+        ImGui::Text("ANALOG TAPE SIMULATOR");
         ImGui::PopStyleColor();
     }
     ImGui::EndChild();
@@ -486,7 +486,7 @@ void NagraApp::_draw_header() {
 }
 
 // ── Preset bar ────────────────────────────────────────────────────────────────
-void NagraApp::_draw_preset_bar() {
+void CapstanApp::_draw_preset_bar() {
     if (_col_button("LOAD", Col::green_dim, Col::green, 50)) _open_load_audio();
     ImGui::SameLine();
 
@@ -551,7 +551,7 @@ void NagraApp::_draw_preset_bar() {
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
-void NagraApp::_draw_tabs() {
+void CapstanApp::_draw_tabs() {
     if (!ImGui::BeginTabBar("##tabs")) return;
     if (ImGui::BeginTabItem("  Transport Mechanics  ")) { _draw_transport_tab(); ImGui::EndTabItem(); }
     if (ImGui::BeginTabItem("  Magnetic Flux  "))       { _draw_magnetic_tab();  ImGui::EndTabItem(); }
@@ -559,7 +559,7 @@ void NagraApp::_draw_tabs() {
     ImGui::EndTabBar();
 }
 
-void NagraApp::_draw_transport_tab() {
+void CapstanApp::_draw_transport_tab() {
     ImGui::BeginChild("##ts",{0,0},false); bool c=false;
     c|=_slider("ips",   "CAPSTAN SPEED (IPS)",       _ui_params.ips_base,       0.5f, 30.f,  Col::amber,"Tape speed in inches/second. ↑↓ keys cycle speeds.");
     c|=_slider("mh",    "VOLTAGE DRIFT / JITTER",     _ui_params.motor_health,   0.f,  10.f,  Col::amber,"PSU aging: slow irregular speed surges.");
@@ -573,7 +573,7 @@ void NagraApp::_draw_transport_tab() {
     if (c) _sync_params();
     ImGui::EndChild();
 }
-void NagraApp::_draw_magnetic_tab() {
+void CapstanApp::_draw_magnetic_tab() {
     ImGui::BeginChild("##ms",{0,0},false); bool c=false;
     c|=_slider("drv",  "HEAD SATURATION",             _ui_params.drive,          1.f,  20.f,  Col::cyan,"Drive into coating. Higher = warmth then clip.");
     c|=_slider("bias", "AC BIAS TUNING",              _ui_params.bias,           0.5f, 3.f,   Col::cyan,"Under=bright/distorted. Over=dark/clean.");
@@ -587,7 +587,7 @@ void NagraApp::_draw_magnetic_tab() {
     if (c) _sync_params();
     ImGui::EndChild();
 }
-void NagraApp::_draw_electronics_tab() {
+void CapstanApp::_draw_electronics_tab() {
     ImGui::BeginChild("##es",{0,0},false); bool c=false;
     c|=_slider("hiss",   "NOISE FLOOR",               _ui_params.hiss,          0.f,  0.02f,  Col::purple,"Broadband white noise from preamp/oxide.");
     c|=_slider("hcol",   "HISS COLOUR (PINK TILT)",   _ui_params.hiss_color,    0.f,  1.f,    Col::purple,"1/f noise colouring from preamp transistors.");
@@ -601,7 +601,7 @@ void NagraApp::_draw_electronics_tab() {
 }
 
 // ── Transport controls — always-visible bottom strip ─────────────────────────
-void NagraApp::_draw_transport_controls() {
+void CapstanApp::_draw_transport_controls() {
     bool playing   = _engine.is_playing.load();
     bool rewinding = _audio.is_rewinding();
     bool ffing     = _audio.is_ffing();
@@ -704,7 +704,7 @@ void NagraApp::_draw_transport_controls() {
 }
 
 // ── Transport button helper ───────────────────────────────────────────────────
-bool NagraApp::_transport_btn(const char* label, const ImVec4& bg,
+bool CapstanApp::_transport_btn(const char* label, const ImVec4& bg,
                                const ImVec4& fg, float w, float h)
 {
     ImVec4 hov = {std::min(bg.x*1.5f+.05f,1.f),
@@ -767,11 +767,11 @@ bool NagraApp::_transport_btn(const char* label, const ImVec4& bg,
 }
 
 // ── Render dialog ─────────────────────────────────────────────────────────────
-void NagraApp::_draw_render_dialog() {
+void CapstanApp::_draw_render_dialog() {
     ImGui::SetNextWindowSize({780,720}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_FirstUseEver, {0.5f,0.5f});
-    if (!ImGui::Begin("FORENSIC RENDER / QUEUE", &_show_render_dialog)) { ImGui::End(); return; }
+    if (!ImGui::Begin("RENDER / QUEUE", &_show_render_dialog)) { ImGui::End(); return; }
 
     float lpw = 400.f;
     ImGui::BeginChild("##render_settings",{lpw,0},false);
@@ -839,7 +839,7 @@ void NagraApp::_draw_render_dialog() {
     ImGui::End();
 }
 
-void NagraApp::_draw_render_queue() {
+void CapstanApp::_draw_render_queue() {
     auto st = _renderer.get_status();
     ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
     ImGui::Text("RENDER QUEUE & STATUS"); ImGui::PopStyleColor(); ImGui::Separator();
@@ -903,7 +903,7 @@ void NagraApp::_draw_render_queue() {
 }
 
 // ── Save preset dialog ────────────────────────────────────────────────────────
-void NagraApp::_draw_save_dialog() {
+void CapstanApp::_draw_save_dialog() {
     ImGui::SetNextWindowSize({380,140},ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_FirstUseEver,{0.5f,0.5f});
@@ -925,7 +925,7 @@ void NagraApp::_draw_save_dialog() {
 }
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
-bool NagraApp::_slider(const char* id, const char* label,
+bool CapstanApp::_slider(const char* id, const char* label,
                        float& value, float mn, float mx,
                        const ImVec4& accent, const char* tooltip)
 {
@@ -946,7 +946,7 @@ bool NagraApp::_slider(const char* id, const char* label,
     return changed;
 }
 
-bool NagraApp::_col_button(const char* label, const ImVec4& bg_col,
+bool CapstanApp::_col_button(const char* label, const ImVec4& bg_col,
                             const ImVec4& fg_col, float width)
 {
     ImVec4 hov={std::min(bg_col.x*1.4f,1.f),std::min(bg_col.y*1.4f,1.f),
@@ -961,41 +961,41 @@ bool NagraApp::_col_button(const char* label, const ImVec4& bg_col,
     return p;
 }
 
-std::string NagraApp::_vu_bar(float norm, int width) const {
+std::string CapstanApp::_vu_bar(float norm, int width) const {
     norm=std::clamp(norm,0.f,1.f);
     int f=(int)(norm*width);
     return std::string(f,'#')+std::string(width-f,'.');
 }
 
-void NagraApp::_sync_params() {
+void CapstanApp::_sync_params() {
     std::lock_guard<std::mutex> g(_engine.lock);
     _engine.params=_ui_params;
 }
 
-void NagraApp::_apply_preset(const EngineParams& p, const std::string&) {
+void CapstanApp::_apply_preset(const EngineParams& p, const std::string&) {
     _ui_params=p;
     std::lock_guard<std::mutex> g(_engine.lock);
     _engine.params=p;
     _engine.trigger_fade_in(512);
 }
 
-void NagraApp::_start_forward() {
+void CapstanApp::_start_forward() {
     if (_engine.audio_data.empty()) return;
     _audio.play_forward();
 }
-void NagraApp::_start_reverse() {
+void CapstanApp::_start_reverse() {
     if (_engine.audio_data.empty()) return;
     _audio.play_reverse();
 }
-void NagraApp::_stop_transport() {
+void CapstanApp::_stop_transport() {
     _audio.stop();
 }
-void NagraApp::_toggle_rewind() {
+void CapstanApp::_toggle_rewind() {
     if (_engine.audio_data.empty()) return;
     if (_audio.is_rewinding()) { _audio.stop(); return; }
     _audio.shuttle_rewind(40.f);
 }
-void NagraApp::_toggle_ff() {
+void CapstanApp::_toggle_ff() {
     if (_engine.audio_data.empty()) return;
     if (_audio.is_ffing()) { _audio.stop(); return; }
     _audio.shuttle_ff(40.f);

@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Allow subprojects with old cmake_minimum_required (e.g. PortAudio v19.7.0 needs 3.5)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 project(CapstanVar VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

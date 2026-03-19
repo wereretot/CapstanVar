@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "preset_manager.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -8,7 +9,7 @@ using json = nlohmann::json;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static void ep_to_json(json& j, const std::string& name, const EngineParams& e) {
     j["__version__"] = 1;
-    j["__app__"]     = "ForensicTapeStudio";
+    j["__app__"]     = "CapstanVar";
     j["__name__"]    = name;
     j["oxide_type"]  = e.oxide_type;
     #define F(x) j[#x] = e.x
@@ -414,7 +415,9 @@ void PresetManager::_build_builtins() {
 #undef END_PRESET
 
 // ── PresetManager methods ─────────────────────────────────────────────────────
-PresetManager::PresetManager() { _build_builtins(); }
+PresetManager::PresetManager() {
+ _build_builtins();
+ }
 
 std::optional<Preset> PresetManager::find_builtin(const std::string& name) const {
     for (auto& pr : _builtins)
@@ -451,7 +454,7 @@ std::optional<Preset> PresetManager::import_preset(const std::string& path) cons
     try {
         std::ifstream f(path);
         json j = json::parse(f);
-        if (j.value("__app__", "") != "ForensicTapeStudio") return std::nullopt;
+        if (j.value("__app__", "") != "CapstanVar") return std::nullopt;
         Preset pr;
         pr.name   = j.value("__name__", path);
         pr.params = ep_from_json(j);

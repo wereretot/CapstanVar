@@ -66,6 +66,7 @@ public:
         _show_all    = false;
         _sort_col    = SortCol::Name;
         _sort_asc    = true;
+        _load_favorites();
         _navigate(start_dir.empty() ? _home() : start_dir);
     }
 
@@ -83,6 +84,7 @@ public:
         _search_buf[0] = '\0';
         _sort_col    = SortCol::Name;
         _sort_asc    = true;
+        _load_favorites();
         std::strncpy(_filename_buf, default_name.c_str(), sizeof(_filename_buf)-1);
         _navigate(start_dir.empty() ? _home() : start_dir);
     }
@@ -208,6 +210,52 @@ public:
         place("  Music",     home+"/Music");
         place("  Downloads", home+"/Downloads");
         place("/ Root",      "/");
+
+        // ── FAVORITES ────────────────────────────────────────────────────────
+        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Text, {1.f,.65f,.2f,1.f});
+        ImGui::TextUnformatted("FAVORITES"); ImGui::PopStyleColor();
+        ImGui::SameLine();
+        // Add current dir as favorite
+        ImGui::PushStyleColor(ImGuiCol_Button,        {.2f,.35f,.1f,.8f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {.3f,.5f,.15f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text,          {.5f,1.f,.3f,1.f});
+        if (ImGui::SmallButton("[+]")) {
+            std::string cur = _current_dir.string();
+            if (std::find(_favorites.begin(),_favorites.end(),cur)==_favorites.end()) {
+                _favorites.push_back(cur);
+                _save_favorites();
+            }
+        }
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bookmark current directory");
+        ImGui::Separator();
+        int fav_to_remove = -1;
+        for (int fi = 0; fi < (int)_favorites.size(); ++fi) {
+            fs::path fp(_favorites[fi]);
+            std::string flbl = fp.filename().string();
+            if (flbl.empty()) flbl = _favorites[fi];
+            if (flbl.size() > 15) flbl = flbl.substr(0,13) + "..";
+            ImGui::PushID(1000+fi);
+            // Remove button
+            ImGui::PushStyleColor(ImGuiCol_Button,  {.3f,.05f,.05f,.7f});
+            ImGui::PushStyleColor(ImGuiCol_Text,    {.8f,.3f,.3f,1.f});
+            if (ImGui::SmallButton("x")) fav_to_remove = fi;
+            ImGui::PopStyleColor(2);
+            ImGui::SameLine();
+            std::error_code ec;
+            bool exists = fs::is_directory(fp, ec);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                exists ? ImVec4(1.f,.65f,.2f,1.f) : ImVec4(.4f,.4f,.4f,1.f));
+            if (ImGui::Selectable(flbl.c_str()) && exists) _navigate(_favorites[fi]);
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", _favorites[fi].c_str());
+            ImGui::PopID();
+        }
+        if (fav_to_remove >= 0) {
+            _favorites.erase(_favorites.begin()+fav_to_remove);
+            _save_favorites();
+        }
         ImGui::EndChild();
 
         // Handle pending recent click
@@ -328,11 +376,8 @@ public:
         float btn_w = 90.f;
         ImGui::SetNextItemWidth(std::max(50.f,
             ImGui::GetContentRegionAvail().x - btn_w*2 - 12));
-        if (_mode == Mode::Load)
-            ImGui::InputText("##fname", _filename_buf, sizeof(_filename_buf),
-                             ImGuiInputTextFlags_ReadOnly);
-        else
-            ImGui::InputText("##fname", _filename_buf, sizeof(_filename_buf));
+        // Editable in both modes — Load allows typing a filename directly
+        ImGui::InputText("##fname", _filename_buf, sizeof(_filename_buf));
 
         ImGui::SameLine();
         const char* ok_lbl = (_mode == Mode::Load) ? "Open" : "Save";
@@ -384,6 +429,8 @@ private:
     bool                     _sort_asc    = true;
     std::string              _result;
     std::string              _error;
+    std::vector<std::string> _favorites;   // user-bookmarked directories
+    std::string              _fav_path;    // persistence file path
 
     static std::string _home() {
         const char* h = std::getenv("HOME"); return h ? h : "/";
@@ -465,6 +512,22 @@ private:
                 }
                 return _sort_asc ? cmp < 0 : cmp > 0;
             });
+    }
+
+    void _load_favorites() {
+        if (_fav_path.empty()) {
+            const char* h = std::getenv("HOME");
+            _fav_path = h ? std::string(h)+"/.capstanvar_favorites" : ".capstanvar_favorites";
+        }
+        _favorites.clear();
+        std::ifstream f(_fav_path); std::string line;
+        while (std::getline(f, line))
+            if (!line.empty()) _favorites.push_back(line);
+    }
+    void _save_favorites() {
+        if (_fav_path.empty()) return;
+        std::ofstream f(_fav_path);
+        for (auto& s : _favorites) f << s << "\n";
     }
 
     void _go_up() {

@@ -33,10 +33,10 @@ namespace Col {
     inline constexpr ImVec4 white      {0.910f, 0.910f, 0.941f, 1.f};
 }
 
-class NagraApp {
+class CapstanApp {
 public:
-    NagraApp();
-    ~NagraApp();
+    CapstanApp();
+    ~CapstanApp();
     void run();
 
 private:
