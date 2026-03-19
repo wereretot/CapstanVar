@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NagraV VERSION 1.0.0 LANGUAGES CXX)
+project(CapstanVar VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -129,15 +129,15 @@ else()
     message(STATUS "tinyfiledialogs NOT found — file open/save will use stdin fallback")
 endif()
 
-add_executable(NagraV ${APP_SOURCES} ${IMGUI_SOURCES})
+add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES})
 
-target_include_directories(NagraV PRIVATE
+target_include_directories(CapstanVar PRIVATE
     include/
     ${imgui_SOURCE_DIR}
     ${imgui_sfml_SOURCE_DIR}
 )
 
-target_link_libraries(NagraV PRIVATE
+target_link_libraries(CapstanVar PRIVATE
     ImGui-SFML::ImGui-SFML      # exports sfml-graphics + sfml-window + sfml-system
     sfml-graphics
     sfml-window
@@ -149,14 +149,14 @@ target_link_libraries(NagraV PRIVATE
 
 # ── Platform specifics ────────────────────────────────────────────────────────
 if(WIN32)
-    set_target_properties(NagraV PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(NagraV PRIVATE winmm ole32 comdlg32)
+    set_target_properties(CapstanVar PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_libraries(CapstanVar PRIVATE winmm ole32 comdlg32)
 elseif(APPLE)
-    target_link_libraries(NagraV PRIVATE
+    target_link_libraries(CapstanVar PRIVATE
         "-framework CoreAudio" "-framework AudioUnit" "-framework CoreFoundation")
 elseif(UNIX)
-    target_link_libraries(NagraV PRIVATE asound pthread)
+    target_link_libraries(CapstanVar PRIVATE asound pthread)
 endif()
 
 # ── Install ───────────────────────────────────────────────────────────────────
-install(TARGETS NagraV DESTINATION bin)
+install(TARGETS CapstanVar DESTINATION bin)

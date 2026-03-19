@@ -22,7 +22,7 @@ static ImVec4 blend(ImVec4 a, ImVec4 b, float t) {
 // ── NagraApp ──────────────────────────────────────────────────────────────────
 NagraApp::NagraApp()
     : _window(sf::VideoMode(1280, 900),
-              "NAGRA-V  ·  ANALOG FORENSICS  ·  MODULAR DSP",
+              "CapstanVar",
               sf::Style::Default),
       _engine(), _audio(_engine), _presets(), _renderer(_engine)
 {
@@ -420,9 +420,9 @@ void NagraApp::_draw_header() {
         ImGui::SetCursorScreenPos({c0.x, c0.y+2});
         ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
         ImGui::SetWindowFontScale(1.4f);
-        float tw = ImGui::CalcTextSize("NAGRA-V").x;
+        float tw = ImGui::CalcTextSize("CapstanVar").x;
         ImGui::SetCursorPosX((mid_w-tw)*0.5f);
-        ImGui::Text("NAGRA-V");
+        ImGui::Text("CapstanVar");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, Col::grey);

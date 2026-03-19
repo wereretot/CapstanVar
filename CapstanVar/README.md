@@ -1,4 +1,4 @@
-# NAGRA-V  ·  Analog Forensics  ·  Modular DSP
+# CapstanVar  ·  Analog Forensics  ·  Modular DSP
 
 A physically-modelled analogue tape machine simulator — C++20, fully
 cross-platform (Windows / Linux / macOS), no Python runtime required.
@@ -57,7 +57,7 @@ sudo dnf install cmake ninja-build gcc-c++ \
 cd nagra
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
-./build/NagraV
+./build/CapstanVar
 ```
 
 ---
@@ -76,10 +76,10 @@ cmake --build build -j$(nproc)
 cd nagra
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
-build\Release\NagraV.exe
+build\Release\CapstanVar.exe
 ```
 
-Or open `build/NagraV.sln` in Visual Studio and press **Build → Build Solution**.
+Or open `build/CapstanVar.sln` in Visual Studio and press **Build → Build Solution**.
 
 ### MinGW / MSYS2
 

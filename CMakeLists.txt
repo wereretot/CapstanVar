@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 # Must be set BEFORE project() so subproject policy checks use this minimum
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
-project(NagraV VERSION 1.0.0 LANGUAGES CXX C)
+project(CapstanVar VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -135,17 +135,17 @@ else()
     message(STATUS "tinyfiledialogs NOT found — file open/save will use stdin fallback")
 endif()
 
-add_executable(NagraV ${APP_SOURCES} ${IMGUI_SOURCES})
+add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES})
 
-target_compile_definitions(NagraV PRIVATE ${AUDIO_DEFS})
+target_compile_definitions(CapstanVar PRIVATE ${AUDIO_DEFS})
 
-target_include_directories(NagraV PRIVATE
+target_include_directories(CapstanVar PRIVATE
     include/
     ${imgui_SOURCE_DIR}
     ${imgui_sfml_SOURCE_DIR}
 )
 
-target_link_libraries(NagraV PRIVATE
+target_link_libraries(CapstanVar PRIVATE
     ImGui-SFML::ImGui-SFML
     sfml-graphics
     sfml-window
@@ -157,8 +157,8 @@ target_link_libraries(NagraV PRIVATE
 )
 
 if(WIN32)
-    set_target_properties(NagraV PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(NagraV PRIVATE ole32 comdlg32)
+    set_target_properties(CapstanVar PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_libraries(CapstanVar PRIVATE ole32 comdlg32)
 endif()
 
-install(TARGETS NagraV DESTINATION bin)
+install(TARGETS CapstanVar DESTINATION bin)
