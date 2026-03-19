@@ -4,6 +4,8 @@
 #include <SFML/Graphics.hpp>
 #include <SFML/Window/Event.hpp>
 #include <cmath>
+#include <filesystem>
+namespace fs = std::filesystem;
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -178,17 +180,25 @@ void CapstanApp::_process_events() {
 
             // Up/Down arrows — intentionally unbound (reserved for UI scroll)
 
-            // O — open file
+            // O — open audio file
             case sf::Keyboard::O:
-                if (ev.key.control) _open_load_audio();
+                if (ev.key.control && !ev.key.shift) _open_load_audio();
                 break;
 
             default: break;
             } // end if(!typing) switch
 
             // Ctrl+O always works regardless of text focus
-            if (ev.key.control && ev.key.code == sf::Keyboard::O)
+            if (ev.key.control && ev.key.code == sf::Keyboard::O && !ev.key.shift)
                 _open_load_audio();
+            // Ctrl+S = save project; Ctrl+Shift+S = save as
+            if (ev.key.control && ev.key.code == sf::Keyboard::S) {
+                if (ev.key.shift || _project_path.empty()) _open_save_project();
+                else _save_project(_project_path);
+            }
+            // Ctrl+Shift+O = open project
+            if (ev.key.control && ev.key.shift && ev.key.code == sf::Keyboard::O)
+                _open_load_project();
         }
     }
 }
@@ -221,7 +231,14 @@ void CapstanApp::_draw_file_dialogs() {
                 _audio.stop();
                 _loaded_file = path;
                 _engine.load_file(path);
-                _reel.reset();   // prevent delta jump on first play frame
+                _reel.reset();
+                _project_dirty = true;
+                // Clear animation — curves reference the old file's sample positions
+                _anim.clear_all();
+                _anim_cursor = 0.0;
+                _timeline.view_start = 0.0;
+                double new_ts = (double)_engine.total_samples;
+                _timeline.view_end = (new_ts > 0) ? new_ts : 44100.0;
             }
             _fd_pending = FDPending::None;
         }
@@ -258,6 +275,25 @@ void CapstanApp::_draw_file_dialogs() {
                 _render_opts.display_name = path.substr(path.find_last_of("/\\")+1);
                 _show_render_dialog       = false;
                 _renderer.enqueue(_render_opts);
+            }
+            _fd_pending = FDPending::None;
+        }
+        break;
+    case FDPending::LoadProject:
+        if (_fd_load_project.draw()) {
+            std::string path = _fd_load_project.result();
+            if (!path.empty()) _load_project(path);
+            _fd_pending = FDPending::None;
+        }
+        break;
+    case FDPending::SaveProject:
+        if (_fd_save_project.draw()) {
+            std::string path = _fd_save_project.result();
+            if (!path.empty()) {
+                if (path.size()<11 ||
+                    path.substr(path.size()-10) != ".cvproject")
+                    path += ".cvproject";
+                _save_project(path);
             }
             _fd_pending = FDPending::None;
         }
@@ -307,6 +343,9 @@ void CapstanApp::_draw_frame() {
 
     ImGui::Separator();
 
+    // Keep display params in sync for slider display
+    _display_params = _ui_params;
+
     // ── Tabs — fixed height that leaves exactly TRANSPORT_H + margins at bottom
     float avail = io.DisplaySize.y - HEADER_H - PRESETBAR_H
                   - TRANSPORT_H - 28.f; // separators + window padding
@@ -324,6 +363,7 @@ void CapstanApp::_draw_frame() {
     _draw_file_dialogs();
     if (_show_render_dialog) _draw_render_dialog();
     if (_show_save_dialog)   _draw_save_dialog();
+    _draw_timeline();
 }
 
 // ── Compact header ────────────────────────────────────────────────────────────
@@ -487,6 +527,25 @@ void CapstanApp::_draw_header() {
 
 // ── Preset bar ────────────────────────────────────────────────────────────────
 void CapstanApp::_draw_preset_bar() {
+    // Project buttons
+    {
+        bool dirty = _project_dirty;
+        std::string proj_label = "NEW";
+        if (!_project_path.empty()) {
+            proj_label = fs::path(_project_path).stem().string();
+            if (proj_label.size() > 14) proj_label = proj_label.substr(0,12)+"..";
+            if (dirty) proj_label = "* " + proj_label;
+        }
+        if (_col_button(proj_label.c_str(), dirty?Col::orange_dim:Col::bg3,
+                         dirty?Col::orange:Col::grey_lt, 130))
+            _open_save_project();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Save project  (Ctrl+S)\nSave as  (Ctrl+Shift+S)");
+    }
+    ImGui::SameLine();
+    if (_col_button("Open Project", Col::bg3, Col::cyan, 95)) _open_load_project();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open project  (Ctrl+Shift+O)");
+    ImGui::SameLine(0, 12);
     if (_col_button("LOAD", Col::green_dim, Col::green, 50)) _open_load_audio();
     ImGui::SameLine();
 
@@ -544,6 +603,15 @@ void CapstanApp::_draw_preset_bar() {
     if (_col_button("RENDER",Col::purple_dim,Col::purple,70))
         _show_render_dialog=true;
     ImGui::SameLine();
+    {
+        bool tl_active = _timeline.open;
+        if (tl_active) ImGui::PushStyleColor(ImGuiCol_Button, Col::green_dim);
+        if (_col_button("TIMELINE", tl_active?Col::green_dim:Col::bg3,
+                         tl_active?Col::green:Col::grey_lt, 80))
+            _timeline.open = !_timeline.open;
+        if (tl_active) ImGui::PopStyleColor();
+    }
+    ImGui::SameLine();
     // Keyboard hint
     ImGui::PushStyleColor(ImGuiCol_Text,Col::grey);
     ImGui::TextUnformatted("SPC=play  ←→=rwd/ff  Shift+←=reverse  Shift+→=forward  S=stop  R=rev");
@@ -561,41 +629,41 @@ void CapstanApp::_draw_tabs() {
 
 void CapstanApp::_draw_transport_tab() {
     ImGui::BeginChild("##ts",{0,0},false); bool c=false;
-    c|=_slider("ips",   "CAPSTAN SPEED (IPS)",       _ui_params.ips_base,       0.5f, 30.f,  Col::amber,"Tape speed in inches/second. ↑↓ keys cycle speeds.");
-    c|=_slider("mh",    "VOLTAGE DRIFT / JITTER",     _ui_params.motor_health,   0.f,  10.f,  Col::amber,"PSU aging: slow irregular speed surges.");
-    c|=_slider("mdrag", "TORQUE LOAD",                _ui_params.motor_drag,     0.f,  0.9f,  Col::amber,"Friction on capstan/reels.");
-    c|=_slider("mboost","MOTOR BOOST",                _ui_params.motor_boost,    0.f,  0.9f,  Col::amber,"Overdrive motor. Combined with drag = conflict.");
-    c|=_slider("wow",   "WOW INTENSITY",              _ui_params.wow_dep,        0.f,  30.f,  Col::amber,"Slow pitch variation from capstan eccentricity.");
-    c|=_slider("flt",   "FLUTTER INTENSITY",          _ui_params.flutter_dep,    0.f,  10.f,  Col::amber,"Fast speed variation from mechanical resonance.");
-    c|=_slider("scr",   "SCRAPE FLUTTER (3kHz)",      _ui_params.scrape_flutter, 0.f,  1.f,   Col::amber,"Rapid modulation from tape sticking on heads.");
-    c|=_slider("tens",  "REEL TENSION DYNAMICS",      _ui_params.tension_load,   0.f,  0.12f, Col::amber,"Tension variation from supply/takeup reels.");
-    c|=_slider("drop",  "OXIDE DROPOUT RATE",         _ui_params.dropout_rate,   0.f,  1.f,   Col::amber,"Random signal gaps from missing oxide.");
+    c|=_aslider("ips",   "CAPSTAN SPEED (IPS)",       _ui_params.ips_base,       0.5f, 30.f,  Col::amber,"Tape speed in inches/second. ↑↓ keys cycle speeds.");
+    c|=_aslider("mh",    "VOLTAGE DRIFT / JITTER",     _ui_params.motor_health,   0.f,  10.f,  Col::amber,"PSU aging: slow irregular speed surges.");
+    c|=_aslider("mdrag", "TORQUE LOAD",                _ui_params.motor_drag,     0.f,  0.9f,  Col::amber,"Friction on capstan/reels.");
+    c|=_aslider("mboost","MOTOR BOOST",                _ui_params.motor_boost,    0.f,  0.9f,  Col::amber,"Overdrive motor. Combined with drag = conflict.");
+    c|=_aslider("wow",   "WOW INTENSITY",              _ui_params.wow_dep,        0.f,  30.f,  Col::amber,"Slow pitch variation from capstan eccentricity.");
+    c|=_aslider("flt",   "FLUTTER INTENSITY",          _ui_params.flutter_dep,    0.f,  10.f,  Col::amber,"Fast speed variation from mechanical resonance.");
+    c|=_aslider("scr",   "SCRAPE FLUTTER (3kHz)",      _ui_params.scrape_flutter, 0.f,  1.f,   Col::amber,"Rapid modulation from tape sticking on heads.");
+    c|=_aslider("tens",  "REEL TENSION DYNAMICS",      _ui_params.tension_load,   0.f,  0.12f, Col::amber,"Tension variation from supply/takeup reels.");
+    c|=_aslider("drop",  "OXIDE DROPOUT RATE",         _ui_params.dropout_rate,   0.f,  1.f,   Col::amber,"Random signal gaps from missing oxide.");
     if (c) _sync_params();
     ImGui::EndChild();
 }
 void CapstanApp::_draw_magnetic_tab() {
     ImGui::BeginChild("##ms",{0,0},false); bool c=false;
-    c|=_slider("drv",  "HEAD SATURATION",             _ui_params.drive,          1.f,  20.f,  Col::cyan,"Drive into coating. Higher = warmth then clip.");
-    c|=_slider("bias", "AC BIAS TUNING",              _ui_params.bias,           0.5f, 3.f,   Col::cyan,"Under=bright/distorted. Over=dark/clean.");
-    c|=_slider("rd",   "REPLAY DIFFERENTIATION",      _ui_params.replay_diff,    0.f,  1.f,   Col::cyan,"Head reads flux rate-of-change (+6dB/oct HF).");
-    c|=_slider("asp",  "ASPERITIES (MOD NOISE)",      _ui_params.asperities,     0.f,  0.5f,  Col::cyan,"Signal-correlated grain noise.");
-    c|=_slider("bark", "BARKHAUSEN GRAIN",            _ui_params.barkhausen,     0.f,  0.1f,  Col::cyan,"Discrete domain-switching pulses.");
-    c|=_slider("xtk",  "STEREO CROSSTALK",            _ui_params.crosstalk,      0.f,  0.5f,  Col::cyan,"Inter-track magnetic bleed.");
-    c|=_slider("prt",  "PRINT-THROUGH (GHOST)",       _ui_params.print_through,  0.f,  0.1f,  Col::cyan,"Layer-to-layer imprinting: pre/post echo.");
-    c|=_slider("dmg",  "DEMAGNETISATION (HF LOSS)",   _ui_params.demagnetization,0.f,  0.99f, Col::cyan,"Progressive HF rolloff over time.");
-    c|=_slider("shed", "OXIDE SHEDDING",              _ui_params.oxide_shedding, 0.f,  1.f,   Col::cyan,"Binder degradation: random oxide dropout.");
+    c|=_aslider("drv",  "HEAD SATURATION",             _ui_params.drive,          1.f,  20.f,  Col::cyan,"Drive into coating. Higher = warmth then clip.");
+    c|=_aslider("bias", "AC BIAS TUNING",              _ui_params.bias,           0.5f, 3.f,   Col::cyan,"Under=bright/distorted. Over=dark/clean.");
+    c|=_aslider("rd",   "REPLAY DIFFERENTIATION",      _ui_params.replay_diff,    0.f,  1.f,   Col::cyan,"Head reads flux rate-of-change (+6dB/oct HF).");
+    c|=_aslider("asp",  "ASPERITIES (MOD NOISE)",      _ui_params.asperities,     0.f,  0.5f,  Col::cyan,"Signal-correlated grain noise.");
+    c|=_aslider("bark", "BARKHAUSEN GRAIN",            _ui_params.barkhausen,     0.f,  0.1f,  Col::cyan,"Discrete domain-switching pulses.");
+    c|=_aslider("xtk",  "STEREO CROSSTALK",            _ui_params.crosstalk,      0.f,  0.5f,  Col::cyan,"Inter-track magnetic bleed.");
+    c|=_aslider("prt",  "PRINT-THROUGH (GHOST)",       _ui_params.print_through,  0.f,  0.1f,  Col::cyan,"Layer-to-layer imprinting: pre/post echo.");
+    c|=_aslider("dmg",  "DEMAGNETISATION (HF LOSS)",   _ui_params.demagnetization,0.f,  0.99f, Col::cyan,"Progressive HF rolloff over time.");
+    c|=_aslider("shed", "OXIDE SHEDDING",              _ui_params.oxide_shedding, 0.f,  1.f,   Col::cyan,"Binder degradation: random oxide dropout.");
     if (c) _sync_params();
     ImGui::EndChild();
 }
 void CapstanApp::_draw_electronics_tab() {
     ImGui::BeginChild("##es",{0,0},false); bool c=false;
-    c|=_slider("hiss",   "NOISE FLOOR",               _ui_params.hiss,          0.f,  0.02f,  Col::purple,"Broadband white noise from preamp/oxide.");
-    c|=_slider("hcol",   "HISS COLOUR (PINK TILT)",   _ui_params.hiss_color,    0.f,  1.f,    Col::purple,"1/f noise colouring from preamp transistors.");
-    c|=_slider("hum",    "60Hz MAINS HUM",            _ui_params.mains_hum,     0.f,  0.05f,  Col::purple,"AC supply at 60/120/180/240 Hz.");
-    c|=_slider("cut",    "AZIMUTH CUTOFF (Hz)",       _ui_params.cutoff_base,   500.f,22000.f,Col::purple,"Head gap bandwidth.");
-    c|=_slider("bump",   "HEAD BUMP (LF EQ)",         _ui_params.head_bump,     0.f,  5.f,    Col::purple,"Head resonance boosting 50-200 Hz.");
-    c|=_slider("azdrift","AZIMUTH PHASE DRIFT",       _ui_params.azimuth_drift, 0.f,  1.f,    Col::purple,"Head angle error: HF phase diff between channels.");
-    c|=_slider("sticky", "STICKY SHED INTENSITY",     _ui_params.sticky_shed,   0.f,  1.f,    Col::purple,"Binder absorption: squeal, drag, HF loss.");
+    c|=_aslider("hiss",   "NOISE FLOOR",               _ui_params.hiss,          0.f,  0.02f,  Col::purple,"Broadband white noise from preamp/oxide.");
+    c|=_aslider("hcol",   "HISS COLOUR (PINK TILT)",   _ui_params.hiss_color,    0.f,  1.f,    Col::purple,"1/f noise colouring from preamp transistors.");
+    c|=_aslider("hum",    "60Hz MAINS HUM",            _ui_params.mains_hum,     0.f,  0.05f,  Col::purple,"AC supply at 60/120/180/240 Hz.");
+    c|=_aslider("cut",    "AZIMUTH CUTOFF (Hz)",       _ui_params.cutoff_base,   500.f,22000.f,Col::purple,"Head gap bandwidth.");
+    c|=_aslider("bump",   "HEAD BUMP (LF EQ)",         _ui_params.head_bump,     0.f,  5.f,    Col::purple,"Head resonance boosting 50-200 Hz.");
+    c|=_aslider("azdrift","AZIMUTH PHASE DRIFT",       _ui_params.azimuth_drift, 0.f,  1.f,    Col::purple,"Head angle error: HF phase diff between channels.");
+    c|=_aslider("sticky", "STICKY SHED INTENSITY",     _ui_params.sticky_shed,   0.f,  1.f,    Col::purple,"Binder absorption: squeal, drag, HF loss.");
     if (c) _sync_params();
     ImGui::EndChild();
 }
@@ -929,21 +997,153 @@ bool CapstanApp::_slider(const char* id, const char* label,
                        float& value, float mn, float mx,
                        const ImVec4& accent, const char* tooltip)
 {
+    // Three-column layout with fixed absolute positions so nothing ever overlaps:
+    //  Col A [0  .. w*0.42] : slider
+    //  Col B [w*0.43 .. w*0.82] : label (truncated if needed)
+    //  Col C [w*0.83 .. w]      : value right-aligned
+    float w     = ImGui::GetContentRegionAvail().x;
+    float col_a = w * 0.42f;
+    float col_b = w * 0.43f;   // SameLine() position for label
+    float col_c = w * 0.83f;   // SameLine() position for value
+    float val_w = w - col_c;   // width reserved for value text
+
     ImGui::PushStyleColor(ImGuiCol_FrameBg,         dim(accent));
     ImGui::PushStyleColor(ImGuiCol_SliderGrab,       accent);
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
-    ImGui::SetNextItemWidth(std::max(50.f, ImGui::GetContentRegionAvail().x - 200.f));
+    ImGui::SetNextItemWidth(std::max(30.f, col_a));
     bool changed = ImGui::SliderFloat(("##sl_"+std::string(id)).c_str(), &value, mn, mx, "");
     if (tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
-    ImGui::SameLine();
+
+    // Label — clipped to the column width
+    ImGui::SameLine(col_b);
     ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
-    ImGui::TextUnformatted(label); ImGui::PopStyleColor();
-    ImGui::SameLine(std::max(50.f, ImGui::GetWindowWidth()-80.f));
+    // Use a child-less clipping rect via SetNextItemWidth on a dummy, or just
+    // use ImGui::Text with a manual clip. Simplest: SetCursorPosX + Text.
+    ImGui::SetNextItemWidth(col_c - col_b - 4.f);
+    // InputText in display-only mode just for clipping? No — use a Clip trick:
+    // Push clip rect then draw text, then pop.
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float clip_w = col_c - col_b - 6.f;
+        ImGui::PushClipRect(p, {p.x + clip_w, p.y + ImGui::GetTextLineHeightWithSpacing()}, true);
+        ImGui::TextUnformatted(label);
+        ImGui::PopClipRect();
+        // Advance cursor past the label column so next SameLine works correctly
+        ImGui::SetCursorScreenPos({p.x + clip_w + 6.f, p.y});
+    }
+    ImGui::PopStyleColor();
+
+    // Value — right-aligned in its column
+    ImGui::SameLine(col_c);
     ImGui::PushStyleColor(ImGuiCol_Text, accent);
-    ImGui::Text("%.4g",(double)value); ImGui::PopStyleColor();
+    char vbuf[24];
+    std::snprintf(vbuf, sizeof(vbuf), "%.4g", (double)value);
+    // Right-align the value text within val_w
+    float vt_w = ImGui::CalcTextSize(vbuf).x;
+    float vx   = std::max(0.f, val_w - vt_w - 4.f);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + vx);
+    ImGui::TextUnformatted(vbuf);
+    ImGui::PopStyleColor();
+
     ImGui::PopStyleColor(3);
     ImGui::Separator();
     return changed;
+}
+
+
+bool CapstanApp::_aslider(const char* id, const char* label,
+                           float& value, float mn, float mx,
+                           const ImVec4& accent, const char* tooltip)
+{
+    bool has_keys = _anim.has_keys(id);
+
+    // When animated, tint the slider frame green so it's obvious
+    ImVec4 frame_col = has_keys
+        ? ImVec4(0.f, 0.45f, 0.15f, 0.9f)
+        : dim(accent);
+
+    // Draw the slider (reuse existing logic)
+    float w     = ImGui::GetContentRegionAvail().x;
+    float col_a = w * 0.42f;
+    float col_b = w * 0.43f;
+    float col_c = w * 0.83f;
+    float val_w = w - col_c;
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,         frame_col);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab,
+        has_keys ? ImVec4(.2f,1.f,.4f,1.f) : accent);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
+    ImGui::SetNextItemWidth(std::max(30.f, col_a));
+
+    // Slider always shows and writes the BASE value.
+    // Curves affect the engine through _sync_params during playback.
+    bool changed = ImGui::SliderFloat(("##asl_"+std::string(id)).c_str(),
+                                       &value, mn, mx, "");
+    bool hovered = ImGui::IsItemHovered();
+    if (tooltip && hovered) ImGui::SetTooltip("%s  [I = keyframe]", tooltip);
+
+    // ── I key = insert keyframe at current play_head (or anim cursor) ─────────
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_I)) {
+        double t = _engine.is_playing.load()
+                   ? _engine.play_head
+                   : _anim_cursor;
+        _anim.insert_key(id, label, t, value);
+        _timeline.open = true;  // open timeline so user can see what they did
+    }
+
+    // Label
+    ImGui::SameLine(col_b);
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        has_keys ? ImVec4(.4f,1.f,.55f,1.f) : Col::grey_lt);
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float clip_w = col_c - col_b - 6.f;
+        ImGui::PushClipRect(p, {p.x+clip_w, p.y+ImGui::GetTextLineHeightWithSpacing()}, true);
+        ImGui::TextUnformatted(label);
+        ImGui::PopClipRect();
+        ImGui::SetCursorScreenPos({p.x+clip_w+6.f, p.y});
+    }
+    ImGui::PopStyleColor();
+
+    // Value — right-aligned, amber if animated
+    ImGui::SameLine(col_c);
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        has_keys ? ImVec4(.3f,1.f,.5f,1.f) : accent);
+    char vbuf[24];
+    std::snprintf(vbuf, sizeof(vbuf), "%.4g", (double)value);
+    float vt_w = ImGui::CalcTextSize(vbuf).x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, val_w-vt_w-4.f));
+    ImGui::TextUnformatted(vbuf);
+
+    // Keyframe indicator dot at left edge when animated
+    if (has_keys) {
+        ImVec2 dp = {ImGui::GetCursorScreenPos().x - w, ImGui::GetCursorScreenPos().y - ImGui::GetTextLineHeight()};
+        ImGui::GetWindowDrawList()->AddCircleFilled(
+            {dp.x + 6.f, dp.y + ImGui::GetTextLineHeight()*0.5f},
+            4.f, IM_COL32(80,255,120,220));
+    }
+
+    ImGui::PopStyleColor(4);
+    ImGui::Separator();
+    return changed;
+}
+
+void CapstanApp::_draw_timeline() {
+    // Keep anim cursor in sync with playback
+    if (_engine.is_playing.load())
+        _anim_cursor = _engine.play_head;
+
+    double prev_cursor = _anim_cursor;
+    _timeline.draw(_anim, _engine.play_head,
+                   (double)_engine.total_samples, _anim_cursor);
+
+    // If cursor was moved by user click and we're not playing, seek engine
+    if (!_engine.is_playing.load() && _anim_cursor != prev_cursor
+        && _engine.total_samples > 0) {
+        std::lock_guard<std::mutex> g(_engine.lock);
+        _engine.play_head = std::clamp(_anim_cursor,
+                                        0.0, (double)(_engine.total_samples-1));
+    }
 }
 
 bool CapstanApp::_col_button(const char* label, const ImVec4& bg_col,
@@ -969,16 +1169,100 @@ std::string CapstanApp::_vu_bar(float norm, int width) const {
 
 void CapstanApp::_sync_params() {
     std::lock_guard<std::mutex> g(_engine.lock);
-    _engine.params=_ui_params;
+    _engine.params = _ui_params;
 }
 
 void CapstanApp::_apply_preset(const EngineParams& p, const std::string&) {
-    _ui_params=p;
+    _ui_params = p;
     std::lock_guard<std::mutex> g(_engine.lock);
-    _engine.params=p;
+    _engine.params = p;
     _engine.trigger_fade_in(512);
 }
 
+
+void CapstanApp::_open_load_project() {
+    _fd_load_project.open_load("Open Project", {".cvproject"});
+    _fd_pending = FDPending::LoadProject;
+}
+void CapstanApp::_open_save_project() {
+    std::string def = _project_path.empty()
+        ? "untitled.cvproject"
+        : fs::path(_project_path).filename().string();
+    _fd_save_project.open_save("Save Project As", def);
+    _fd_pending = FDPending::SaveProject;
+}
+
+ProjectData CapstanApp::_collect_project_data(const std::string& path) const {
+    ProjectData d;
+    d.project_name   = _project_path.empty()
+                       ? "Untitled"
+                       : fs::path(_project_path).stem().string();
+    d.audio_path_abs = _loaded_file;
+    d.audio_path_rel = path.empty() ? "" : make_relative_audio_path(path, _loaded_file);
+    d.params         = _ui_params;
+    d.anim           = _anim;
+    d.render_sr      = _render_opts.sample_rate;
+    d.render_bit_depth = _render_opts.bit_depth;
+    d.render_quality   = (int)_render_opts.quality;
+    d.render_dither    = _render_opts.dither;
+    d.render_normalize = _render_opts.normalize;
+    d.render_preroll   = _render_opts.preroll_s;
+    d.render_threads   = _render_opts.threads;
+    d.play_head        = _engine.play_head;
+    d.anim_cursor      = _anim_cursor;
+    return d;
+}
+
+void CapstanApp::_save_project(const std::string& path) {
+    ProjectData d = _collect_project_data(path);
+    if (save_project(path, d)) {
+        _project_path  = path;
+        _project_dirty = false;
+        FileDialog::recents.push(path);
+    }
+}
+
+void CapstanApp::_load_project(const std::string& path) {
+    auto d = load_project(path);
+    if (!d) return;  // silent fail — bad format
+
+    _project_path = path;
+    _project_dirty = false;
+
+    // Apply parameters
+    _apply_preset(d->params, d->project_name);
+
+    // Animation
+    _anim = d->anim;
+    _anim_cursor = d->anim_cursor;
+
+    // Render options
+    _render_opts.sample_rate = d->render_sr;
+    _render_opts.bit_depth   = d->render_bit_depth;
+    _render_opts.quality     = (SimQuality)d->render_quality;
+    _render_opts.dither      = d->render_dither;
+    _render_opts.normalize   = d->render_normalize;
+    _render_opts.preroll_s   = d->render_preroll;
+    _render_opts.threads     = d->render_threads;
+
+    // Load audio if path is valid
+    if (!d->audio_path_abs.empty()) {
+        std::error_code ec;
+        if (fs::is_regular_file(d->audio_path_abs, ec)) {
+            _audio.stop();
+            _loaded_file = d->audio_path_abs;
+            _engine.load_file(_loaded_file);
+            _reel.reset();
+            // Seek to saved position
+            {
+                std::lock_guard<std::mutex> g(_engine.lock);
+                _engine.play_head = d->play_head;
+            }
+        }
+    }
+
+    FileDialog::recents.push(path);
+}
 void CapstanApp::_start_forward() {
     if (_engine.audio_data.empty()) return;
     _audio.play_forward();

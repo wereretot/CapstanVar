@@ -6,6 +6,9 @@
 #include "render_engine.hpp"
 #include "file_dialog.hpp"
 #include "reel_widget.hpp"
+#include "param_anim.hpp"
+#include "project.hpp"
+#include "timeline_widget.hpp"
 #include <SFML/Graphics.hpp>
 #include <string>
 #include <functional>
@@ -46,15 +49,23 @@ private:
     PresetManager    _presets;
     RenderEngine     _renderer;
 
-    EngineParams _ui_params;
+    EngineParams _ui_params;      // user base values (never overwritten by curves)
+    EngineParams _display_params; // = _ui_params with curves applied; shown in sliders
     int          _preset_idx = 0;
     std::string  _loaded_file;
-    ReelWidget   _reel;   // isolated reel animation state
+    ReelWidget      _reel;      // isolated reel animation state
+    ParamAnim       _anim;      // keyframe animation data
+    TimelineWidget  _timeline;  // timeline panel
+    double          _anim_cursor = 0.0;  // timeline edit cursor (samples)
+    std::string     _project_path;       // current .cvproject file path
+    bool            _project_dirty = false; // unsaved changes
 
     // File dialogs
     FileDialog  _fd_load_audio, _fd_load_preset, _fd_save_preset, _fd_save_render;
+    FileDialog  _fd_load_project, _fd_save_project;
     std::function<void(const std::string&)> _fd_callback;
-    enum class FDPending { None, LoadAudio, LoadPreset, SavePreset, SaveRender };
+    enum class FDPending { None, LoadAudio, LoadPreset, SavePreset, SaveRender,
+                           LoadProject, SaveProject };
     FDPending _fd_pending = FDPending::None;
 
     // Render dialog
@@ -86,6 +97,7 @@ private:
     void _draw_render_dialog();
     void _draw_render_queue();
     void _draw_save_dialog();
+    void _draw_timeline();
 
     // Helpers
     void _sync_params();
@@ -99,6 +111,11 @@ private:
     void _open_load_preset();
     void _open_save_preset(const std::string& default_name);
     void _open_save_render();
+    void _open_load_project();
+    void _open_save_project();
+    void _save_project(const std::string& path);
+    void _load_project(const std::string& path);
+    ProjectData _collect_project_data(const std::string& path) const;
 
     // Tape-machine style tall button (multi-line label, coloured)
     bool _transport_btn(const char* label, const ImVec4& bg, const ImVec4& fg,
@@ -109,5 +126,10 @@ private:
     bool _slider(const char* id, const char* label, float& value,
                  float mn, float mx, const ImVec4& accent,
                  const char* tooltip = nullptr);
+    // Animated slider — same as _slider but highlights when keyframed
+    // and inserts a keyframe when I is pressed while hovered.
+    bool _aslider(const char* id, const char* label, float& value,
+                  float mn, float mx, const ImVec4& accent,
+                  const char* tooltip = nullptr);
     std::string _vu_bar(float norm, int width = 20) const;
 };
