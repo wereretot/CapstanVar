@@ -9,6 +9,7 @@
 #include "param_anim.hpp"
 #include "project.hpp"
 #include "app_dirs.hpp"
+#include "app_icon.hpp"
 #include "timeline_widget.hpp"
 #include <SFML/Graphics.hpp>
 #include <string>

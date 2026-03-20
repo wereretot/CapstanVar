@@ -40,6 +40,9 @@ CapstanApp::CapstanApp()
     AppDirs::init();   // create ~/.local/share/CapstanVar/ tree on first run
     FileDialog::recents.load(AppDirs::recents_file());
 
+    // Set window icon from embedded RGBA data
+    _window.setIcon(AppIcon::WIDTH, AppIcon::HEIGHT, AppIcon::PIXELS);
+
     auto pr = _presets.find_builtin("Ampex 456 (30ips)");
     if (pr) _apply_preset(pr->params, pr->name);
     _audio.open();   // start DSP thread now; transport starts in Stopped/braking state
