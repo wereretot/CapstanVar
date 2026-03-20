@@ -58,15 +58,52 @@ struct TimelineWidget {
         if (anim.enabled != was_en && !anim.enabled)
             ImGui::SetTooltip("Curves are evaluated but UI sliders reflect base values");
 
-        ImGui::SameLine(0,16);
-        ImGui::PushStyleColor(ImGuiCol_Text, {.5f,.5f,.6f,1.f});
-        ImGui::TextUnformatted("I = insert keyframe   Del = delete selected   "
-                               "Scroll = zoom   MMB drag = pan");
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
+        ImGui::SameLine(0, 16);
+        // Key badge helper drawn inline on the toolbar
+        auto key_hint = [&](const char* k, const char* desc) {
+            auto* dl = ImGui::GetWindowDrawList();
+            ImFont* font = ImGui::GetFont();
+            float   fs   = ImGui::GetFontSize();
+            float   px   = 4.f, py = 1.f;
+            ImVec2  ksz  = font->CalcTextSizeA(fs, FLT_MAX, 0.f, k);
+            float   kw   = ksz.x + px * 2.f;
+            float   kh   = ksz.y + py * 2.f;
+            ImVec2  cur  = ImGui::GetCursorScreenPos();
+            // Badge box
+            dl->AddRectFilled({cur.x, cur.y + py - 1.f},
+                              {cur.x + kw, cur.y + kh},
+                              IM_COL32(38,38,52,255), 3.f);
+            dl->AddRect({cur.x, cur.y + py - 1.f},
+                        {cur.x + kw, cur.y + kh},
+                        IM_COL32(90,90,120,200), 3.f, 0, 1.f);
+            dl->AddText(font, fs, {cur.x + px, cur.y + py},
+                        IM_COL32(210,215,240,255), k);
+            // Advance cursor past badge
+            ImGui::Dummy({kw, kh});
+            ImGui::SameLine(0, 3);
+            // Description
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.5f,.5f,.62f,1.f));
+            ImGui::TextUnformatted(desc);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 14);
+        };
+        key_hint("I",      "insert keyframe");
+        key_hint("Del",    "delete selected");
+        key_hint("Scroll", "zoom");
+        key_hint("MMB",    "pan");
+
+        // Fit and Clear All as styled buttons
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.1f,.2f,.35f,.8f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.15f,.3f,.5f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(.5f,.75f,1.f,1.f));
         if (ImGui::SmallButton("Fit")) { view_start=0; view_end=total_samples; }
-        ImGui::SameLine();
+        ImGui::PopStyleColor(3);
+        ImGui::SameLine(0, 4);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.3f,.08f,.08f,.8f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.45f,.12f,.12f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.f,.45f,.45f,1.f));
         if (ImGui::SmallButton("Clear All")) anim.clear_all();
+        ImGui::PopStyleColor(3);
         ImGui::Separator();
 
         // ── Layout: left list + right canvas ─────────────────────────────────
@@ -187,7 +224,6 @@ struct TimelineWidget {
         {
             double sr = 44100.0;
             double span = view_end - view_start;
-            double tick_interval = std::pow(10.0, std::floor(std::log10(span / 8.0)));
             // Round to nice intervals (1, 2, 5 × 10^n seconds)
             double secs_span = span / sr;
             double tick_secs = std::pow(10.0, std::floor(std::log10(secs_span/6)));
@@ -301,10 +337,7 @@ struct TimelineWidget {
                 float mn, mx;
                 get_range(dragging->id, mn, mx);
                 double new_t = std::max(0.0, x_to_t(io.MousePos.x));
-                float new_v = std::clamp(
-                    dragging->v0 + (dragging->v0 - mn) * (-io.MouseDelta.y / row_h * (mx-mn)) * 0.0f
-                    // Vertical drag: map row_h to full value range
-                    , mn, mx);
+                // (vertical drag reserved for future use)
                 // Recalculate from cumulative delta
                 float delta_y = io.MousePos.y - (cpos.y + row_h * 0.5f);  // rough
                 (void)delta_y;

@@ -8,6 +8,7 @@
 #include "reel_widget.hpp"
 #include "param_anim.hpp"
 #include "project.hpp"
+#include "app_dirs.hpp"
 #include "timeline_widget.hpp"
 #include <SFML/Graphics.hpp>
 #include <string>
@@ -57,8 +58,8 @@ private:
     ParamAnim       _anim;      // keyframe animation data
     TimelineWidget  _timeline;  // timeline panel
     double          _anim_cursor = 0.0;  // timeline edit cursor (samples)
-    std::string     _project_path;       // current .cvproject file path
-    bool            _project_dirty = false; // unsaved changes
+    std::string     _project_path;
+    bool            _project_dirty     = false;
 
     // File dialogs
     FileDialog  _fd_load_audio, _fd_load_preset, _fd_save_preset, _fd_save_render;
@@ -69,7 +70,11 @@ private:
     FDPending _fd_pending = FDPending::None;
 
     // Render dialog
-    bool          _show_render_dialog = false;
+    bool          _show_render_dialog  = false;
+    bool          _show_close_confirm     = false;
+    bool          _show_new_confirm       = false;
+    bool          _pending_close_after_save = false;
+    bool          _pending_new_after_save   = false;
     RenderOptions _render_opts;
 
     // Save preset dialog
@@ -115,6 +120,9 @@ private:
     void _open_save_project();
     void _save_project(const std::string& path);
     void _load_project(const std::string& path);
+    void _new_project();
+    void _update_window_title();
+    void _draw_close_confirm();
     ProjectData _collect_project_data(const std::string& path) const;
 
     // Tape-machine style tall button (multi-line label, coloured)

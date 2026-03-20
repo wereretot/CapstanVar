@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdio>
 #include <fstream>
+#include "app_dirs.hpp"
 #include <cctype>
 #include <chrono>
 #include <ctime>
@@ -515,10 +516,8 @@ private:
     }
 
     void _load_favorites() {
-        if (_fav_path.empty()) {
-            const char* h = std::getenv("HOME");
-            _fav_path = h ? std::string(h)+"/.capstanvar_favorites" : ".capstanvar_favorites";
-        }
+        if (_fav_path.empty())
+            _fav_path = AppDirs::favorites_file();
         _favorites.clear();
         std::ifstream f(_fav_path); std::string line;
         while (std::getline(f, line))

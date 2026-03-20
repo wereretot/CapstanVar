@@ -24,7 +24,7 @@ struct ReelWidget {
 
     void draw(double play_head,
               int    total_samples,
-              bool   is_reversed,
+              bool   /*is_reversed*/,
               bool   is_moving,
               float  tape_speed,   // signed AudioIO speed (+ fwd / - rev)
               ImVec2 pos,

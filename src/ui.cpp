@@ -37,9 +37,8 @@ CapstanApp::CapstanApp()
     _render_opts.dc_block    = true;
     _render_opts.normalize   = true;
 
-    const char* home = std::getenv("HOME");
-    std::string rp   = home ? std::string(home)+"/.capstanvar_recents" : ".capstanvar_recents";
-    FileDialog::recents.load(rp);
+    AppDirs::init();   // create ~/.local/share/CapstanVar/ tree on first run
+    FileDialog::recents.load(AppDirs::recents_file());
 
     auto pr = _presets.find_builtin("Ampex 456 (30ips)");
     if (pr) _apply_preset(pr->params, pr->name);
@@ -67,9 +66,12 @@ void CapstanApp::run() {
 // ── ImGui init ────────────────────────────────────────────────────────────────
 void CapstanApp::_init_imgui() {
     (void)ImGui::SFML::Init(_window);
+    // Rebuild font atlas at 15px — ImGui-SFML default is 13px (too small)
     ImGuiIO& io = ImGui::GetIO();
-    // NavEnableKeyboard disabled: we handle all transport keys ourselves
-    // io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.Fonts->Clear();
+    io.Fonts->AddFontDefault();  // adds Proggy Clean
+    // Scale up: rebuild at 15px by using FontGlobalScale
+    io.FontGlobalScale = 15.f / 13.f;  // ~1.154 — scales all text up uniformly
     (void)ImGui::SFML::UpdateFontTexture();
 }
 
@@ -119,7 +121,9 @@ void CapstanApp::_process_events() {
     while (_window.pollEvent(ev)) {
         ImGui::SFML::ProcessEvent(_window, ev);
         if (ev.type == sf::Event::Closed) {
-            _audio.stop(); _window.close();
+            _audio.stop();
+            if (_project_dirty) _show_close_confirm = true;
+            else                _window.close();
         }
 
         // Keyboard shortcuts — only when ImGui is not consuming keyboard
@@ -210,11 +214,13 @@ void CapstanApp::_open_load_audio() {
     _fd_pending = FDPending::LoadAudio;
 }
 void CapstanApp::_open_load_preset() {
-    _fd_load_preset.open_load("Import Preset", {".cvpr",".json"});
+    _fd_load_preset.open_load("Import Preset", {".cvpr",".json"},
+                          AppDirs::presets());
     _fd_pending = FDPending::LoadPreset;
 }
 void CapstanApp::_open_save_preset(const std::string& default_name) {
-    _fd_save_preset.open_save("Export Preset", default_name+".cvpr");
+    _fd_save_preset.open_save("Export Preset", default_name+".cvpr",
+                          AppDirs::presets());
     _fd_pending = FDPending::SavePreset;
 }
 void CapstanApp::_open_save_render() {
@@ -233,6 +239,7 @@ void CapstanApp::_draw_file_dialogs() {
                 _engine.load_file(path);
                 _reel.reset();
                 _project_dirty = true;
+                _update_window_title();
                 // Clear animation — curves reference the old file's sample positions
                 _anim.clear_all();
                 _anim_cursor = 0.0;
@@ -294,6 +301,14 @@ void CapstanApp::_draw_file_dialogs() {
                     path.substr(path.size()-10) != ".cvproject")
                     path += ".cvproject";
                 _save_project(path);
+                if (_pending_close_after_save) {
+                    _pending_close_after_save = false;
+                    _window.close();
+                }
+                if (_pending_new_after_save) {
+                    _pending_new_after_save = false;
+                    _new_project();
+                }
             }
             _fd_pending = FDPending::None;
         }
@@ -320,9 +335,9 @@ void CapstanApp::_draw_file_dialogs() {
 // Key trick: draw the transport CHILD last but with a RESERVED negative height
 // in the tabs child so both are always fully visible.
 
-static constexpr float TRANSPORT_H = 118.f;  // reserved height for transport strip
-static constexpr float HEADER_H    = 88.f;
-static constexpr float PRESETBAR_H = 34.f;
+static constexpr float TRANSPORT_H = 140.f;  // row1(60) + row2(30) + footer(24) + padding
+static constexpr float HEADER_H    = 96.f;
+static constexpr float PRESETBAR_H = 38.f;
 
 void CapstanApp::_draw_frame() {
     ImGuiIO& io = ImGui::GetIO();
@@ -343,8 +358,27 @@ void CapstanApp::_draw_frame() {
 
     ImGui::Separator();
 
-    // Keep display params in sync for slider display
+    // Compute display params: base + curves (for slider visual feedback).
+    // Also push animated values to engine every frame during playback.
     _display_params = _ui_params;
+    if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load()) {
+        _anim.apply(_display_params, _engine.play_head);
+        std::lock_guard<std::mutex> g(_engine.lock);
+        EngineParams& ep = _engine.params;
+        ep.ips_base=_display_params.ips_base; ep.motor_health=_display_params.motor_health;
+        ep.motor_drag=_display_params.motor_drag; ep.motor_boost=_display_params.motor_boost;
+        ep.wow_dep=_display_params.wow_dep; ep.flutter_dep=_display_params.flutter_dep;
+        ep.scrape_flutter=_display_params.scrape_flutter; ep.tension_load=_display_params.tension_load;
+        ep.dropout_rate=_display_params.dropout_rate; ep.drive=_display_params.drive;
+        ep.bias=_display_params.bias; ep.replay_diff=_display_params.replay_diff;
+        ep.asperities=_display_params.asperities; ep.barkhausen=_display_params.barkhausen;
+        ep.crosstalk=_display_params.crosstalk; ep.print_through=_display_params.print_through;
+        ep.demagnetization=_display_params.demagnetization; ep.oxide_shedding=_display_params.oxide_shedding;
+        ep.hiss=_display_params.hiss; ep.hiss_color=_display_params.hiss_color;
+        ep.mains_hum=_display_params.mains_hum; ep.cutoff_base=_display_params.cutoff_base;
+        ep.head_bump=_display_params.head_bump; ep.azimuth_drift=_display_params.azimuth_drift;
+        ep.sticky_shed=_display_params.sticky_shed; ep.oxide_type=_display_params.oxide_type;
+    }
 
     // ── Tabs — fixed height that leaves exactly TRANSPORT_H + margins at bottom
     float avail = io.DisplaySize.y - HEADER_H - PRESETBAR_H
@@ -361,6 +395,7 @@ void CapstanApp::_draw_frame() {
     ImGui::End();
 
     _draw_file_dialogs();
+    _draw_close_confirm();
     if (_show_render_dialog) _draw_render_dialog();
     if (_show_save_dialog)   _draw_save_dialog();
     _draw_timeline();
@@ -442,8 +477,6 @@ void CapstanApp::_draw_header() {
     {
         // Reel visualisation using draw list
         ImVec2 c0 = ImGui::GetCursorScreenPos();
-        bool   pl   = _engine.is_playing.load();
-
         // Reel animation — ground truth is play_head delta per frame.
         // Captures inertia, speed, direction, wow, flutter, all effects.
         _reel.draw(
@@ -459,7 +492,7 @@ void CapstanApp::_draw_header() {
         // Title (centred between reels)
         ImGui::SetCursorScreenPos({c0.x, c0.y+2});
         ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
-        ImGui::SetWindowFontScale(1.4f);
+        ImGui::SetWindowFontScale(1.3f);
         float tw = ImGui::CalcTextSize("CAPSTANVAR").x;
         ImGui::SetCursorPosX((mid_w-tw)*0.5f);
         ImGui::Text("CAPSTANVAR");
@@ -537,14 +570,23 @@ void CapstanApp::_draw_preset_bar() {
             if (dirty) proj_label = "* " + proj_label;
         }
         if (_col_button(proj_label.c_str(), dirty?Col::orange_dim:Col::bg3,
-                         dirty?Col::orange:Col::grey_lt, 130))
-            _open_save_project();
+                         dirty?Col::orange:Col::grey_lt, 130)) {
+            // Like Ctrl+S: save in-place if path known, else Save As
+            if (_project_path.empty()) _open_save_project();
+            else _save_project(_project_path);
+        }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Save project  (Ctrl+S)\nSave as  (Ctrl+Shift+S)");
+            ImGui::SetTooltip("Save project  (Ctrl+S)\nRight-click: Save As");
     }
     ImGui::SameLine();
-    if (_col_button("Open Project", Col::bg3, Col::cyan, 95)) _open_load_project();
+    if (_col_button("Open Project", Col::bg3, Col::cyan, 115)) _open_load_project();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open project  (Ctrl+Shift+O)");
+    ImGui::SameLine(0, 4);
+    if (_col_button("New", Col::bg3, Col::grey_lt, 44)) {
+        if (_project_dirty) _show_new_confirm = true;
+        else                _new_project();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("New project  (clears all state)");
     ImGui::SameLine(0, 12);
     if (_col_button("LOAD", Col::green_dim, Col::green, 50)) _open_load_audio();
     ImGui::SameLine();
@@ -599,23 +641,6 @@ void CapstanApp::_draw_preset_bar() {
     if (_col_button("SAVE AS",Col::bg3,Col::purple,72)) {
         _show_save_dialog=true; _save_name_buf[0]='\0';
     }
-    ImGui::SameLine(0,16);
-    if (_col_button("RENDER",Col::purple_dim,Col::purple,70))
-        _show_render_dialog=true;
-    ImGui::SameLine();
-    {
-        bool tl_active = _timeline.open;
-        if (tl_active) ImGui::PushStyleColor(ImGuiCol_Button, Col::green_dim);
-        if (_col_button("TIMELINE", tl_active?Col::green_dim:Col::bg3,
-                         tl_active?Col::green:Col::grey_lt, 80))
-            _timeline.open = !_timeline.open;
-        if (tl_active) ImGui::PopStyleColor();
-    }
-    ImGui::SameLine();
-    // Keyboard hint
-    ImGui::PushStyleColor(ImGuiCol_Text,Col::grey);
-    ImGui::TextUnformatted("SPC=play  ←→=rwd/ff  Shift+←=reverse  Shift+→=forward  S=stop  R=rev");
-    ImGui::PopStyleColor();
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -676,7 +701,7 @@ void CapstanApp::_draw_transport_controls() {
     bool reversed  = _engine.is_reversed;
 
     // Button sizing — tall, wide, tape-machine style
-    const float BTN_H  = 54.f;
+    const float BTN_H  = 60.f;
     const float BTN_W  = 115.f;
     const float SH_W   = 95.f;   // shuttle buttons
     const float STOP_W = 72.f;
@@ -692,13 +717,13 @@ void CapstanApp::_draw_transport_controls() {
 
         // REWIND
         if (rewinding) {
-            char lb[24]; std::snprintf(lb,sizeof(lb),"<< %.0fx",rwd_speeds[rwd_tier]);
+            char lb[24]; std::snprintf(lb,sizeof(lb),"<< %.0fX",rwd_speeds[rwd_tier]);
             ImVec4 flash = (std::fmod(ImGui::GetTime()*3.f,1.f)>.5f) ? Col::cyan : Col::cyan_dim;
             if (_transport_btn(lb, Col::cyan_dim, flash, SH_W, BTN_H))
                 { rwd_tier=(rwd_tier+1)%3; _audio.cycle_shuttle_speed(); }
         } else {
             rwd_tier=0;
-            if (_transport_btn("|<\nREWIND", Col::bg4, Col::cyan, SH_W, BTN_H))
+            if (_transport_btn("<<\nREWIND", Col::bg4, Col::cyan, SH_W, BTN_H))
                 { _stop_transport(); _toggle_rewind(); }
         }
         ImGui::SameLine(0,4);
@@ -708,7 +733,7 @@ void CapstanApp::_draw_transport_controls() {
             bool active = playing && !reversed;
             ImVec4 bg   = active ? blend(Col::amber_dim,Col::amber,.5f) : Col::bg4;
             ImVec4 fg   = active ? Col::amber : Col::white;
-            const char* lbl = active ? "|>\nPLAYING" : "|>\nPLAY";
+            const char* lbl = active ? ">\nPLAYING" : ">\nPLAY";
             if (_transport_btn(lbl, bg, fg, BTN_W, BTN_H)) _start_forward();
         }
         ImGui::SameLine(0,4);
@@ -717,7 +742,7 @@ void CapstanApp::_draw_transport_controls() {
         {
             bool active = !playing && !rewinding && !ffing;
             ImVec4 bg   = active ? blend(Col::red_dim,Col::red,.4f) : Col::bg4;
-            if (_transport_btn("--\nSTOP", bg, active?Col::red:Col::white, STOP_W, BTN_H))
+            if (_transport_btn("[ ]\nSTOP", bg, active?Col::red:Col::white, STOP_W, BTN_H))
                 _stop_transport();
         }
         ImGui::SameLine(0,4);
@@ -727,48 +752,134 @@ void CapstanApp::_draw_transport_controls() {
             bool active = playing && reversed;
             ImVec4 bg   = active ? blend(Col::orange_dim,Col::orange,.5f) : Col::bg4;
             ImVec4 fg   = active ? Col::orange : Col::white;
-            const char* lbl = active ? "<|\nREVERSING" : "<|\nREVERSE";
+            const char* lbl = active ? "<\nREVERSING" : "<\nREVERSE";
             if (_transport_btn(lbl, bg, fg, BTN_W, BTN_H)) _start_reverse();
         }
         ImGui::SameLine(0,4);
 
         // FF
         if (ffing) {
-            char lb[24]; std::snprintf(lb,sizeof(lb),"%.0fx\n>>",rwd_speeds[ff_tier]);
+            char lb[24]; std::snprintf(lb,sizeof(lb),">> %.0fX",rwd_speeds[ff_tier]);
             ImVec4 flash = (std::fmod(ImGui::GetTime()*3.f,1.f)>.5f) ? Col::green : Col::green_dim;
             if (_transport_btn(lb, Col::green_dim, flash, SH_W, BTN_H))
                 { ff_tier=(ff_tier+1)%3; _audio.cycle_shuttle_speed(); }
         } else {
             ff_tier=0;
-            if (_transport_btn("FF\n>|", Col::bg4, Col::green, SH_W, BTN_H))
+            if (_transport_btn(">>\nFF", Col::bg4, Col::green, SH_W, BTN_H))
                 { _stop_transport(); _toggle_ff(); }
         }
         ImGui::SameLine(0,12);
 
-        // Render progress / button (right side)
+        // Render progress (when running)
         {
             auto st = _renderer.get_status();
             if (_renderer.is_running()) {
                 char lb[64];
-                std::snprintf(lb,sizeof(lb),"%s\n%.0f%% %.1fx",
+                std::snprintf(lb,sizeof(lb),"%s  %.0f%%  %.1fx",
                               st.phase.c_str(), st.job_progress*100.f, st.xrt);
                 ImGui::PushStyleColor(ImGuiCol_PlotHistogram, Col::purple_dim);
                 ImGui::PushStyleColor(ImGuiCol_FrameBg, Col::bg3);
-                ImGui::ProgressBar(st.job_progress,{200,BTN_H},lb);
+                ImGui::ProgressBar(st.job_progress,{220,BTN_H},lb);
                 ImGui::PopStyleColor(2);
-            } else {
-                if (_transport_btn("(o)\nRENDER", Col::purple_dim, Col::purple, 100, BTN_H))
-                    _show_render_dialog=true;
             }
         }
     }
 
-    // ── Row 2: keyboard hints ─────────────────────────────────────────────────
-    ImGui::PushStyleColor(ImGuiCol_Text, Col::grey);
-    ImGui::Text("← RWD   SPACE play/stop   S stop   R rev   → FF   ↑↓ IPS   Ctrl+O load");
-    ImGui::PopStyleColor();
-
     ImGui::PopStyleVar(2);
+
+    // ── Row 2: tool buttons + shortcut bar ────────────────────────────────────
+    // Thin separator line
+    ImGui::Spacing();
+    {
+        const float row_h = 26.f;
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  {6.f, 3.f});
+
+        // TIMELINE button
+        {
+            bool on = _timeline.open;
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                on ? ImVec4(.0f,.28f,.12f,.9f) : ImVec4(.12f,.12f,.16f,.9f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                on ? ImVec4(.0f,.38f,.18f,1.f) : ImVec4(.18f,.18f,.24f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                on ? ImVec4(.35f,1.f,.55f,1.f) : ImVec4(.6f,.6f,.68f,1.f));
+            ImGui::SetNextItemWidth(90.f);
+            if (ImGui::Button(on ? "TIMELINE ##tl" : "TIMELINE ##tl", {90.f, row_h}))
+                _timeline.open = !_timeline.open;
+            ImGui::PopStyleColor(3);
+        }
+        ImGui::SameLine(0, 4);
+
+        // RENDER button  
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.18f,.08f,.28f,.9f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.28f,.12f,.42f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(.75f,.45f,1.f,1.f));
+        if (ImGui::Button("RENDER ##rnd", {80.f, row_h}))
+            _show_render_dialog = true;
+        ImGui::PopStyleColor(3);
+
+        ImGui::PopStyleVar(2);
+    }
+
+    // ── Shortcut footer ───────────────────────────────────────────────────────
+    {
+        auto* dl    = ImGui::GetWindowDrawList();
+        float  ww   = ImGui::GetWindowWidth();
+        ImVec2 wpos = ImGui::GetWindowPos();
+        float  cy   = ImGui::GetCursorScreenPos().y + 2.f;
+
+        // Background strip for the shortcut bar
+        dl->AddRectFilled({wpos.x, cy - 2.f}, {wpos.x + ww, cy + 20.f},
+                          IM_COL32(18, 18, 26, 255));
+        // Top edge line
+        dl->AddLine({wpos.x, cy - 2.f}, {wpos.x + ww, cy - 2.f},
+                    IM_COL32(50, 50, 68, 255), 1.f);
+
+        struct KV { const char* key; const char* desc; };
+        static const KV shortcuts[] = {
+            {"Space",      "play/stop"},
+            {"S",          "stop"},
+            {"R",          "reverse"},
+            {"< / >",      "rwd/ff"},
+            {"Ctrl+O",     "load audio"},
+            {"Ctrl+S",     "save project"},
+            {"Ctrl+Sh+S",  "save as"},
+            {"Ctrl+Sh+O",  "open project"},
+        };
+
+        ImFont* font  = ImGui::GetFont();
+        float   fs    = ImGui::GetFontSize() * 0.90f;  // slightly smaller for footer
+        float   pad_x = 5.f, pad_y = 1.f;
+        float   x     = wpos.x + 8.f;
+        float   y     = cy;
+
+        for (auto& s : shortcuts) {
+            ImVec2 ksz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, s.key);
+            float  kw  = ksz.x + pad_x * 2.f;
+            float  kh  = ksz.y + pad_y * 2.f;
+
+            // Key badge — rounded dark box with bright border
+            dl->AddRectFilled({x, y + pad_y - 1.f},
+                              {x + kw, y + kh},
+                              IM_COL32(38, 38, 52, 255), 3.f);
+            dl->AddRect({x, y + pad_y - 1.f},
+                        {x + kw, y + kh},
+                        IM_COL32(90, 90, 120, 200), 3.f, 0, 1.f);
+            // Key text — bright white-blue
+            dl->AddText(font, fs, {x + pad_x, y + pad_y},
+                        IM_COL32(210, 215, 240, 255), s.key);
+            x += kw + 4.f;
+
+            // Description — muted warm grey, slightly larger gap after
+            ImVec2 dsz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, s.desc);
+            dl->AddText(font, fs, {x, y + pad_y},
+                        IM_COL32(130, 128, 145, 255), s.desc);
+            x += dsz.x + 16.f;
+        }
+        float line_h = ImGui::GetFontSize() + pad_y * 2.f;
+        ImGui::Dummy({1.f, line_h + 4.f});
+    }
 }
 
 // ── Transport button helper ───────────────────────────────────────────────────
@@ -802,8 +913,8 @@ bool CapstanApp::_transport_btn(const char* label, const ImVec4& bg,
     ImU32 dim_col = IM_COL32((int)(fg.x*180),(int)(fg.y*180),(int)(fg.z*180),210);
     ImFont* font  = ImGui::GetFont();
     float   base  = ImGui::GetFontSize();   // snapshot BEFORE any scale call
-    float   big   = base * 1.55f;
-    float   small = base * 0.85f;
+    float   big   = base * 2.0f;
+    float   small = base * 0.88f;
 
     std::string lbl(label);
     auto nl = lbl.find('\n');
@@ -993,138 +1104,199 @@ void CapstanApp::_draw_save_dialog() {
 }
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
+// Custom drawn parameter row:
+//   [ LABEL            ][=====|              ][ VALUE ]
+//   Left: label text   Middle: fill-bar       Right: numeric, click-editable
+//
+// The bar is drawn on the ImDrawList for full colour control.
+// An invisible ImGui::SliderFloat on top provides drag + scroll interaction.
+// Animation support: when has_keys, bar glows green and a keyframe dot appears.
+
+static void _draw_param_row(
+    ImDrawList* dl,
+    ImVec2 row_pos, float row_w, float row_h,
+    const char* label, const char* val_str,
+    float norm,
+    const ImVec4& accent,
+    bool has_keys, bool is_animated,
+    bool hovered_slider)
+{
+    // Two-line layout within row_h:
+    //  y0 → label (left) + value (right)
+    //  y1 → thin track bar spanning full width (with margins)
+    //  y2 → 2px gap (separator)
+    ImFont* font  = ImGui::GetFont();
+    float   fs    = ImGui::GetFontSize();
+    float   fs_lbl = fs * 0.92f;   // label font size
+    float   pad   = 6.f;
+
+    float text_y  = row_pos.y + 2.f;
+    float track_y = row_pos.y + row_h - 9.f;  // track near bottom of row
+    float track_x0 = row_pos.x + pad;
+    float track_x1 = row_pos.x + row_w - pad;
+    float track_w  = track_x1 - track_x0;
+    float clamp_norm = std::clamp(norm, 0.f, 1.f);
+
+    // ── Label ─────────────────────────────────────────────────────────────────
+    ImU32 lbl_col = has_keys
+        ? IM_COL32(100, 255, 140, 220)
+        : (hovered_slider ? IM_COL32(200,200,220,230) : IM_COL32(160,158,180,190));
+
+    // Reserve space for value on the right so label doesn't overlap it
+    ImVec2 vsz   = font->CalcTextSizeA(fs_lbl, FLT_MAX, 0.f, val_str);
+    float  val_x = row_pos.x + row_w - vsz.x - pad;
+
+    // Clip label so it never runs into the value
+    dl->PushClipRect(row_pos, {val_x - 4.f, row_pos.y + row_h}, true);
+    // Keyframe dot inline with label
+    float text_draw_x = row_pos.x + pad;
+    if (has_keys) {
+        float dot_cy = text_y + fs_lbl * 0.5f;
+        ImU32 dot_c  = is_animated ? IM_COL32(60,255,110,255) : IM_COL32(60,200,90,180);
+        dl->AddCircleFilled({text_draw_x + 3.f, dot_cy}, 3.f, dot_c);
+        text_draw_x += 10.f;
+    }
+    dl->AddText(font, fs_lbl, {text_draw_x, text_y}, lbl_col, label);
+    dl->PopClipRect();
+
+    // ── Value (right-aligned, accent colour) ──────────────────────────────────
+    ImU32 val_col = has_keys
+        ? IM_COL32(80, 255, 130, 255)
+        : ImGui::ColorConvertFloat4ToU32(
+            hovered_slider ? accent : ImVec4(accent.x*.85f,accent.y*.85f,accent.z*.85f,0.85f));
+    dl->AddText(font, fs_lbl, {val_x, text_y}, val_col, val_str);
+
+    // ── Track: thin line ──────────────────────────────────────────────────────
+    float ty = track_y + 1.5f;   // centre of 3px track
+
+    // Full track — very dim
+    ImU32 track_bg = has_keys
+        ? IM_COL32(15, 50, 22, 200)
+        : IM_COL32(40, 40, 55, 180);
+    dl->AddLine({track_x0, ty}, {track_x1, ty}, track_bg, 3.f);
+
+    // Filled portion — accent-tinted, moderate brightness
+    float fill_x = track_x0 + track_w * clamp_norm;
+    if (fill_x > track_x0 + 1.f) {
+        ImU32 fill_c;
+        if (has_keys) {
+            fill_c = is_animated ? IM_COL32(50,210,95,230) : IM_COL32(40,170,75,200);
+        } else {
+            // Accent at ~55% brightness so it's clearly visible but not glaring
+            fill_c = IM_COL32(
+                (int)(accent.x * 155 + 20),
+                (int)(accent.y * 100 + 10),
+                (int)(accent.z * 40),
+                210);
+        }
+        dl->AddLine({track_x0, ty}, {fill_x, ty}, fill_c, 3.f);
+    }
+
+    // ── Position dot ──────────────────────────────────────────────────────────
+    {
+        float dot_r  = hovered_slider ? 5.f : 4.f;
+        ImU32 dot_c  = has_keys
+            ? (is_animated ? IM_COL32(80,255,120,255) : IM_COL32(60,210,90,220))
+            : ImGui::ColorConvertFloat4ToU32(
+                hovered_slider ? accent
+                               : ImVec4(accent.x,accent.y*.85f,accent.z*.4f,0.9f));
+        // Subtle glow ring when hovered
+        if (hovered_slider)
+            dl->AddCircleFilled({fill_x, ty}, dot_r + 3.f,
+                IM_COL32((int)(accent.x*80),(int)(accent.y*60),(int)(accent.z*20),60));
+        dl->AddCircleFilled({fill_x, ty}, dot_r, dot_c);
+    }
+
+    // ── Row separator — barely visible ────────────────────────────────────────
+    dl->AddLine(
+        {row_pos.x, row_pos.y + row_h - 1.f},
+        {row_pos.x + row_w, row_pos.y + row_h - 1.f},
+        IM_COL32(28, 28, 40, 180));
+}
+
 bool CapstanApp::_slider(const char* id, const char* label,
                        float& value, float mn, float mx,
                        const ImVec4& accent, const char* tooltip)
 {
-    // Three-column layout with fixed absolute positions so nothing ever overlaps:
-    //  Col A [0  .. w*0.42] : slider
-    //  Col B [w*0.43 .. w*0.82] : label (truncated if needed)
-    //  Col C [w*0.83 .. w]      : value right-aligned
-    float w     = ImGui::GetContentRegionAvail().x;
-    float col_a = w * 0.42f;
-    float col_b = w * 0.43f;   // SameLine() position for label
-    float col_c = w * 0.83f;   // SameLine() position for value
-    float val_w = w - col_c;   // width reserved for value text
+    const float ROW_H = 32.f;
+    float w = ImGui::GetContentRegionAvail().x;
+    float bar_x = 0.f;   // hit area spans full row
+    float bar_w = w;
+    float norm  = (mx > mn) ? (value - mn) / (mx - mn) : 0.f;
 
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,         dim(accent));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab,       accent);
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
-    ImGui::SetNextItemWidth(std::max(30.f, col_a));
-    bool changed = ImGui::SliderFloat(("##sl_"+std::string(id)).c_str(), &value, mn, mx, "");
-    if (tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
-
-    // Label — clipped to the column width
-    ImGui::SameLine(col_b);
-    ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
-    // Use a child-less clipping rect via SetNextItemWidth on a dummy, or just
-    // use ImGui::Text with a manual clip. Simplest: SetCursorPosX + Text.
-    ImGui::SetNextItemWidth(col_c - col_b - 4.f);
-    // InputText in display-only mode just for clipping? No — use a Clip trick:
-    // Push clip rect then draw text, then pop.
-    {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float clip_w = col_c - col_b - 6.f;
-        ImGui::PushClipRect(p, {p.x + clip_w, p.y + ImGui::GetTextLineHeightWithSpacing()}, true);
-        ImGui::TextUnformatted(label);
-        ImGui::PopClipRect();
-        // Advance cursor past the label column so next SameLine works correctly
-        ImGui::SetCursorScreenPos({p.x + clip_w + 6.f, p.y});
-    }
-    ImGui::PopStyleColor();
-
-    // Value — right-aligned in its column
-    ImGui::SameLine(col_c);
-    ImGui::PushStyleColor(ImGuiCol_Text, accent);
-    char vbuf[24];
-    std::snprintf(vbuf, sizeof(vbuf), "%.4g", (double)value);
-    // Right-align the value text within val_w
-    float vt_w = ImGui::CalcTextSize(vbuf).x;
-    float vx   = std::max(0.f, val_w - vt_w - 4.f);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + vx);
-    ImGui::TextUnformatted(vbuf);
-    ImGui::PopStyleColor();
-
+    ImVec2 row_pos = ImGui::GetCursorScreenPos();
+    // Invisible slider on the bar region
+    ImGui::SetCursorScreenPos({row_pos.x, row_pos.y});
+    ImGui::SetNextItemWidth(bar_w);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,         {0,0,0,0});
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab,       {0,0,0,0});
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, {0,0,0,0});
+    bool changed = ImGui::SliderFloat(("##sl_"+std::string(id)).c_str(),
+                                      &value, mn, mx, "");
+    bool hov = ImGui::IsItemHovered();
     ImGui::PopStyleColor(3);
-    ImGui::Separator();
+    if (tooltip && hov) ImGui::SetTooltip("%s", tooltip);
+    // Reset cursor to row start for drawing
+    ImGui::SetCursorScreenPos(row_pos);
+    ImGui::Dummy({w, ROW_H});
+
+    char vbuf[24]; std::snprintf(vbuf, sizeof(vbuf), "%.4g", (double)value);
+    _draw_param_row(ImGui::GetWindowDrawList(), row_pos, w, ROW_H,
+                    label, vbuf, norm, accent, false, false, hov);
     return changed;
 }
-
 
 bool CapstanApp::_aslider(const char* id, const char* label,
                            float& value, float mn, float mx,
                            const ImVec4& accent, const char* tooltip)
 {
-    bool has_keys = _anim.has_keys(id);
+    bool has_keys   = _anim.has_keys(id);
+    bool is_playing = _engine.is_playing.load();
+    bool is_animated = has_keys && _anim.enabled && is_playing;
 
-    // When animated, tint the slider frame green so it's obvious
-    ImVec4 frame_col = has_keys
-        ? ImVec4(0.f, 0.45f, 0.15f, 0.9f)
-        : dim(accent);
+    // Evaluate animated display value
+    float show_val = value;
+    if (is_animated) {
+        auto it = _anim.curves.find(id);
+        if (it != _anim.curves.end())
+            if (auto v = it->second.evaluate(_engine.play_head)) show_val = *v;
+    }
 
-    // Draw the slider (reuse existing logic)
+    const float ROW_H = 32.f;
     float w     = ImGui::GetContentRegionAvail().x;
-    float col_a = w * 0.42f;
-    float col_b = w * 0.43f;
-    float col_c = w * 0.83f;
-    float val_w = w - col_c;
+    float bar_x = 0.f;   // hit area spans full row
+    float bar_w = w;
+    float norm  = (mx > mn) ? (show_val - mn) / (mx - mn) : 0.f;
 
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,         frame_col);
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab,
-        has_keys ? ImVec4(.2f,1.f,.4f,1.f) : accent);
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
-    ImGui::SetNextItemWidth(std::max(30.f, col_a));
+    ImVec2 row_pos = ImGui::GetCursorScreenPos();
 
-    // Slider always shows and writes the BASE value.
-    // Curves affect the engine through _sync_params during playback.
+    // Invisible slider
+    ImGui::SetCursorScreenPos({row_pos.x, row_pos.y});
+    ImGui::SetNextItemWidth(bar_w);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,         {0,0,0,0});
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab,       {0,0,0,0});
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, {0,0,0,0});
     bool changed = ImGui::SliderFloat(("##asl_"+std::string(id)).c_str(),
-                                       &value, mn, mx, "");
-    bool hovered = ImGui::IsItemHovered();
-    if (tooltip && hovered) ImGui::SetTooltip("%s  [I = keyframe]", tooltip);
+                                      &show_val, mn, mx, "");
+    if (changed) value = show_val;
+    bool hov = ImGui::IsItemHovered();
+    ImGui::PopStyleColor(3);
+    if (tooltip && hov) ImGui::SetTooltip("%s  [I = keyframe]", tooltip);
 
-    // ── I key = insert keyframe at current play_head (or anim cursor) ─────────
-    if (hovered && ImGui::IsKeyPressed(ImGuiKey_I)) {
-        double t = _engine.is_playing.load()
-                   ? _engine.play_head
-                   : _anim_cursor;
+    // I key = insert keyframe
+    if (hov && ImGui::IsKeyPressed(ImGuiKey_I)) {
+        double t = is_playing ? _engine.play_head : _anim_cursor;
         _anim.insert_key(id, label, t, value);
-        _timeline.open = true;  // open timeline so user can see what they did
+        _timeline.open = true;
     }
 
-    // Label
-    ImGui::SameLine(col_b);
-    ImGui::PushStyleColor(ImGuiCol_Text,
-        has_keys ? ImVec4(.4f,1.f,.55f,1.f) : Col::grey_lt);
-    {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float clip_w = col_c - col_b - 6.f;
-        ImGui::PushClipRect(p, {p.x+clip_w, p.y+ImGui::GetTextLineHeightWithSpacing()}, true);
-        ImGui::TextUnformatted(label);
-        ImGui::PopClipRect();
-        ImGui::SetCursorScreenPos({p.x+clip_w+6.f, p.y});
-    }
-    ImGui::PopStyleColor();
+    // Reset cursor for visual draw
+    ImGui::SetCursorScreenPos(row_pos);
+    ImGui::Dummy({w, ROW_H});
 
-    // Value — right-aligned, amber if animated
-    ImGui::SameLine(col_c);
-    ImGui::PushStyleColor(ImGuiCol_Text,
-        has_keys ? ImVec4(.3f,1.f,.5f,1.f) : accent);
-    char vbuf[24];
-    std::snprintf(vbuf, sizeof(vbuf), "%.4g", (double)value);
-    float vt_w = ImGui::CalcTextSize(vbuf).x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, val_w-vt_w-4.f));
-    ImGui::TextUnformatted(vbuf);
-
-    // Keyframe indicator dot at left edge when animated
-    if (has_keys) {
-        ImVec2 dp = {ImGui::GetCursorScreenPos().x - w, ImGui::GetCursorScreenPos().y - ImGui::GetTextLineHeight()};
-        ImGui::GetWindowDrawList()->AddCircleFilled(
-            {dp.x + 6.f, dp.y + ImGui::GetTextLineHeight()*0.5f},
-            4.f, IM_COL32(80,255,120,220));
-    }
-
-    ImGui::PopStyleColor(4);
-    ImGui::Separator();
+    char vbuf[24]; std::snprintf(vbuf, sizeof(vbuf), "%.4g", (double)show_val);
+    _draw_param_row(ImGui::GetWindowDrawList(), row_pos, w, ROW_H,
+                    label, vbuf, norm, accent, has_keys, is_animated, hov);
     return changed;
 }
 
@@ -1168,27 +1340,46 @@ std::string CapstanApp::_vu_bar(float norm, int width) const {
 }
 
 void CapstanApp::_sync_params() {
+    // Copy only user-controllable DSP fields — never touch transport internals.
     std::lock_guard<std::mutex> g(_engine.lock);
-    _engine.params = _ui_params;
+    EngineParams& ep = _engine.params;
+    ep.ips_base=_ui_params.ips_base; ep.motor_health=_ui_params.motor_health;
+    ep.motor_drag=_ui_params.motor_drag; ep.motor_boost=_ui_params.motor_boost;
+    ep.wow_dep=_ui_params.wow_dep; ep.flutter_dep=_ui_params.flutter_dep;
+    ep.scrape_flutter=_ui_params.scrape_flutter; ep.tension_load=_ui_params.tension_load;
+    ep.dropout_rate=_ui_params.dropout_rate; ep.drive=_ui_params.drive;
+    ep.bias=_ui_params.bias; ep.replay_diff=_ui_params.replay_diff;
+    ep.asperities=_ui_params.asperities; ep.barkhausen=_ui_params.barkhausen;
+    ep.crosstalk=_ui_params.crosstalk; ep.print_through=_ui_params.print_through;
+    ep.demagnetization=_ui_params.demagnetization; ep.oxide_shedding=_ui_params.oxide_shedding;
+    ep.hiss=_ui_params.hiss; ep.hiss_color=_ui_params.hiss_color;
+    ep.mains_hum=_ui_params.mains_hum; ep.cutoff_base=_ui_params.cutoff_base;
+    ep.head_bump=_ui_params.head_bump; ep.azimuth_drift=_ui_params.azimuth_drift;
+    ep.sticky_shed=_ui_params.sticky_shed; ep.oxide_type=_ui_params.oxide_type;
+    // Apply curves on top if playing
+    if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load())
+        _anim.apply(ep, _engine.play_head);
+    _project_dirty = true;
 }
 
 void CapstanApp::_apply_preset(const EngineParams& p, const std::string&) {
     _ui_params = p;
-    std::lock_guard<std::mutex> g(_engine.lock);
-    _engine.params = p;
+    _sync_params();
     _engine.trigger_fade_in(512);
 }
 
 
 void CapstanApp::_open_load_project() {
-    _fd_load_project.open_load("Open Project", {".cvproject"});
+    _fd_load_project.open_load("Open Project", {".cvproject"},
+                           AppDirs::projects());
     _fd_pending = FDPending::LoadProject;
 }
 void CapstanApp::_open_save_project() {
     std::string def = _project_path.empty()
         ? "untitled.cvproject"
         : fs::path(_project_path).filename().string();
-    _fd_save_project.open_save("Save Project As", def);
+    _fd_save_project.open_save("Save Project As", def,
+                               AppDirs::projects());
     _fd_pending = FDPending::SaveProject;
 }
 
@@ -1219,6 +1410,7 @@ void CapstanApp::_save_project(const std::string& path) {
         _project_path  = path;
         _project_dirty = false;
         FileDialog::recents.push(path);
+        _update_window_title();
     }
 }
 
@@ -1262,7 +1454,159 @@ void CapstanApp::_load_project(const std::string& path) {
     }
 
     FileDialog::recents.push(path);
+    _update_window_title();
 }
+void CapstanApp::_update_window_title() {
+    std::string title = "CAPSTANVAR";
+    if (!_project_path.empty()) {
+        title += "  —  " + fs::path(_project_path).stem().string();
+        if (_project_dirty) title += " *";
+    } else if (_project_dirty) {
+        title += "  —  Untitled *";
+    }
+    title += "  ·  ANALOG TAPE SIMULATOR";
+    _window.setTitle(title);
+}
+
+void CapstanApp::_new_project() {
+    _audio.stop();
+    _engine.audio_data.clear();
+    _engine.total_samples = 0;
+    _engine.play_head     = 0.0;
+    _loaded_file.clear();
+    _reel.reset();
+
+    // Reset to default preset
+    auto pr = _presets.find_builtin("Ampex 456 (30ips)");
+    if (pr) _apply_preset(pr->params, pr->name);
+
+    // Clear animation
+    _anim = ParamAnim{};
+    _anim_cursor = 0.0;
+    _timeline.view_start      = 0.0;
+    _timeline.view_end        = 44100.0;
+    _timeline.prev_cursor_pos = -1.0;
+
+    // Clear project identity
+    _project_path.clear();
+    _project_dirty = false;
+    _show_new_confirm = false;
+    _update_window_title();
+}
+
+void CapstanApp::_draw_close_confirm() {
+    // ── Unsaved changes on CLOSE ──────────────────────────────────────────────
+    if (_show_close_confirm) {
+        ImGui::OpenPopup("Unsaved Changes##close");
+        _show_close_confirm = false;
+    }
+    ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, {0.5f, 0.5f});
+    if (ImGui::BeginPopupModal("Unsaved Changes##close",
+                               nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, {1.f,.85f,.2f,1.f});
+        ImGui::TextWrapped("You have unsaved changes in \"%s\".",
+            _project_path.empty() ? "Untitled"
+                                  : fs::path(_project_path).stem().string().c_str());
+        ImGui::PopStyleColor();
+        ImGui::TextUnformatted("Save before closing?");
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_Button,        {.15f,.35f,.15f,.9f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {.2f,.5f,.2f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text,          {.4f,1.f,.4f,1.f});
+        if (ImGui::Button("Save & Close", {120, 0})) {
+            if (_project_path.empty()) {
+                // Need a path — open Save As, then close will happen after save
+                ImGui::CloseCurrentPopup();
+                _fd_save_project.open_save("Save Project As",
+                    "untitled.cvproject", AppDirs::projects());
+                // Mark that after save we should close
+                _pending_close_after_save = true;
+            } else {
+                _save_project(_project_path);
+                ImGui::CloseCurrentPopup();
+                _window.close();
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 8);
+        ImGui::PushStyleColor(ImGuiCol_Button,        {.35f,.1f,.1f,.9f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {.5f,.15f,.15f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text,          {1.f,.4f,.4f,1.f});
+        if (ImGui::Button("Discard & Close", {130, 0})) {
+            ImGui::CloseCurrentPopup();
+            _project_dirty = false;
+            _window.close();
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 8);
+        if (ImGui::Button("Cancel", {70, 0}))
+            ImGui::CloseCurrentPopup();
+
+        ImGui::Spacing();
+        ImGui::EndPopup();
+    }
+
+    // ── Unsaved changes on NEW ────────────────────────────────────────────────
+    if (_show_new_confirm) {
+        ImGui::OpenPopup("Unsaved Changes##new");
+        _show_new_confirm = false;
+    }
+    ImGui::SetNextWindowSize({360, 0}, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, {0.5f, 0.5f});
+    if (ImGui::BeginPopupModal("Unsaved Changes##new",
+                               nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, {1.f,.85f,.2f,1.f});
+        ImGui::TextWrapped("You have unsaved changes in \"%s\".",
+            _project_path.empty() ? "Untitled"
+                                  : fs::path(_project_path).stem().string().c_str());
+        ImGui::PopStyleColor();
+        ImGui::TextUnformatted("Save before creating a new project?");
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_Button,        {.15f,.35f,.15f,.9f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {.2f,.5f,.2f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text,          {.4f,1.f,.4f,1.f});
+        if (ImGui::Button("Save & New", {110, 0})) {
+            if (_project_path.empty()) {
+                ImGui::CloseCurrentPopup();
+                _fd_save_project.open_save("Save Project As", "untitled.cvproject",
+                           AppDirs::projects());
+                _pending_new_after_save = true;
+            } else {
+                _save_project(_project_path);
+                ImGui::CloseCurrentPopup();
+                _new_project();
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 8);
+        ImGui::PushStyleColor(ImGuiCol_Button,        {.35f,.1f,.1f,.9f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {.5f,.15f,.15f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text,          {1.f,.4f,.4f,1.f});
+        if (ImGui::Button("Discard & New", {120, 0})) {
+            ImGui::CloseCurrentPopup();
+            _new_project();
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 8);
+        if (ImGui::Button("Cancel", {70, 0}))
+            ImGui::CloseCurrentPopup();
+
+        ImGui::Spacing();
+        ImGui::EndPopup();
+    }
+}
+
 void CapstanApp::_start_forward() {
     if (_engine.audio_data.empty()) return;
     _audio.play_forward();
