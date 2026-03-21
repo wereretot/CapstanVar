@@ -16,7 +16,7 @@ namespace fs = std::filesystem;
 #endif
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
-static ImVec4 dim(ImVec4 c, float f = 0.3f) { return {c.x*f,c.y*f,c.z*f,c.w}; }
+[[maybe_unused]] static ImVec4 dim(ImVec4 c, float f = 0.3f) { return {c.x*f,c.y*f,c.z*f,c.w}; }
 static ImVec4 blend(ImVec4 a, ImVec4 b, float t) {
     return {a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t, a.z+(b.z-a.z)*t, 1.f};
 }
@@ -37,7 +37,8 @@ CapstanApp::CapstanApp()
     _render_opts.dc_block    = true;
     _render_opts.normalize   = true;
 
-    AppDirs::init();   // create ~/.local/share/CapstanVar/ tree on first run
+    AppDirs::init();
+    _perf.load();
     FileDialog::recents.load(AppDirs::recents_file());
 
     // Set window icon from embedded RGBA data
@@ -233,26 +234,39 @@ void CapstanApp::_open_save_render() {
 
 void CapstanApp::_draw_file_dialogs() {
     switch (_fd_pending) {
-    case FDPending::LoadAudio:
+    case FDPending::LoadAudio: {
         if (_fd_load_audio.draw()) {
             std::string path = _fd_load_audio.result();
             if (!path.empty()) {
-                _audio.stop();
-                _loaded_file = path;
-                _engine.load_file(path);
-                _reel.reset();
-                _project_dirty = true;
-                _update_window_title();
-                // Clear animation — curves reference the old file's sample positions
-                _anim.clear_all();
-                _anim_cursor = 0.0;
-                _timeline.view_start = 0.0;
-                double new_ts = (double)_engine.total_samples;
-                _timeline.view_end = (new_ts > 0) ? new_ts : 44100.0;
+                std::error_code _ec;
+                if (!fs::is_regular_file(path, _ec)) {
+                    CV_ERR(FILE_NOT_FOUND, path);
+                } else {
+                    _audio.stop();
+                    _loaded_file = path;
+                    if (!_engine.load_file(path)) {
+                        CV_ERR(FILE_OPEN_FAILED, path);
+                        _loaded_file.clear();
+                    } else {
+                        // Apply current perf settings to stream buffer
+                        _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
+                        _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
+                        _reel.reset();
+                        _project_dirty = true;
+                        _update_window_title();
+                        _anim.clear_all();
+                        _anim_cursor = 0.0;
+                        _timeline.view_start = 0.0;
+                        double new_ts = (double)_engine.total_samples;
+                        _timeline.view_end = (new_ts > 0) ? new_ts : 44100.0;
+                        _timeline.prev_cursor_pos = 0.0;
+                    }
+                }
             }
             _fd_pending = FDPending::None;
         }
         break;
+    }
     case FDPending::LoadPreset:
         if (_fd_load_preset.draw()) {
             std::string path = _fd_load_preset.result();
@@ -283,6 +297,7 @@ void CapstanApp::_draw_file_dialogs() {
                 if (path.size()<4||path.substr(path.size()-4)!=".wav") path+=".wav";
                 _render_opts.path         = path;
                 _render_opts.display_name = path.substr(path.find_last_of("/\\")+1);
+                _render_opts.anim         = _anim;  // snapshot animation at enqueue time
                 _show_render_dialog       = false;
                 _renderer.enqueue(_render_opts);
             }
@@ -338,7 +353,7 @@ void CapstanApp::_draw_file_dialogs() {
 // Key trick: draw the transport CHILD last but with a RESERVED negative height
 // in the tabs child so both are always fully visible.
 
-static constexpr float TRANSPORT_H = 140.f;  // row1(60) + row2(30) + footer(24) + padding
+static constexpr float TRANSPORT_H = 144.f;  // row1(60) + row2(30) + footer(28) + padding
 static constexpr float HEADER_H    = 96.f;
 static constexpr float PRESETBAR_H = 38.f;
 
@@ -402,6 +417,9 @@ void CapstanApp::_draw_frame() {
     if (_show_render_dialog) _draw_render_dialog();
     if (_show_save_dialog)   _draw_save_dialog();
     _draw_timeline();
+    _draw_error_log();
+    if (_show_options) _draw_options();
+    ErrorLog::get().clear_new_flag();
 }
 
 // ── Compact header ────────────────────────────────────────────────────────────
@@ -814,13 +832,27 @@ void CapstanApp::_draw_transport_controls() {
         }
         ImGui::SameLine(0, 4);
 
-        // RENDER button  
+        // RENDER button
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.18f,.08f,.28f,.9f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.28f,.12f,.42f,1.f));
         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(.75f,.45f,1.f,1.f));
         if (ImGui::Button("RENDER ##rnd", {80.f, row_h}))
-            _show_render_dialog = true;
+            _show_render_dialog = !_show_render_dialog;
         ImGui::PopStyleColor(3);
+        ImGui::SameLine(0, 4);
+
+        // OPTIONS button — opens side panel at same position as RENDER
+        {
+            bool on = _show_options;
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                on ? ImVec4(.06f,.18f,.32f,.95f) : ImVec4(.10f,.10f,.18f,.90f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.10f,.25f,.44f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                on ? ImVec4(.4f,.8f,1.f,1.f) : ImVec4(.55f,.60f,.75f,1.f));
+            if (ImGui::Button("OPTIONS##row2", {84.f, row_h}))
+                _show_options = !_show_options;
+            ImGui::PopStyleColor(3);
+        }
 
         ImGui::PopStyleVar(2);
     }
@@ -831,57 +863,44 @@ void CapstanApp::_draw_transport_controls() {
         float  ww   = ImGui::GetWindowWidth();
         ImVec2 wpos = ImGui::GetWindowPos();
         float  cy   = ImGui::GetCursorScreenPos().y + 2.f;
+        ImFont* font  = ImGui::GetFont();
+        float   fs    = ImGui::GetFontSize() * 0.90f;
+        float   pad_x = 5.f, pad_y = 1.f;
+        float   kh    = font->CalcTextSizeA(fs,FLT_MAX,0.f,"X").y + pad_y*2.f;
+        float   bar_h = kh + 6.f;
 
-        // Background strip for the shortcut bar
-        dl->AddRectFilled({wpos.x, cy - 2.f}, {wpos.x + ww, cy + 20.f},
-                          IM_COL32(18, 18, 26, 255));
-        // Top edge line
+        dl->AddRectFilled({wpos.x, cy - 2.f}, {wpos.x + ww, cy + bar_h},
+                          IM_COL32(14, 14, 22, 255));
         dl->AddLine({wpos.x, cy - 2.f}, {wpos.x + ww, cy - 2.f},
                     IM_COL32(50, 50, 68, 255), 1.f);
 
         struct KV { const char* key; const char* desc; };
         static const KV shortcuts[] = {
-            {"Space",      "play/stop"},
-            {"S",          "stop"},
-            {"R",          "reverse"},
-            {"< / >",      "rwd/ff"},
-            {"Ctrl+O",     "load audio"},
-            {"Ctrl+S",     "save project"},
-            {"Ctrl+Sh+S",  "save as"},
-            {"Ctrl+Sh+O",  "open project"},
+            {"Space",     "play/stop"},
+            {"S",         "stop"},
+            {"R",         "reverse"},
+            {"< / >",     "rwd/ff"},
+            {"Ctrl+O",    "load"},
+            {"Ctrl+S",    "save"},
+            {"Ctrl+Sh+S", "save as"},
+            {"Ctrl+Sh+O", "open proj"},
         };
 
-        ImFont* font  = ImGui::GetFont();
-        float   fs    = ImGui::GetFontSize() * 0.90f;  // slightly smaller for footer
-        float   pad_x = 5.f, pad_y = 1.f;
-        float   x     = wpos.x + 8.f;
-        float   y     = cy;
-
+        float x = wpos.x + 8.f, y = cy + 2.f;
         for (auto& s : shortcuts) {
             ImVec2 ksz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, s.key);
-            float  kw  = ksz.x + pad_x * 2.f;
-            float  kh  = ksz.y + pad_y * 2.f;
-
-            // Key badge — rounded dark box with bright border
-            dl->AddRectFilled({x, y + pad_y - 1.f},
-                              {x + kw, y + kh},
-                              IM_COL32(38, 38, 52, 255), 3.f);
-            dl->AddRect({x, y + pad_y - 1.f},
-                        {x + kw, y + kh},
-                        IM_COL32(90, 90, 120, 200), 3.f, 0, 1.f);
-            // Key text — bright white-blue
-            dl->AddText(font, fs, {x + pad_x, y + pad_y},
-                        IM_COL32(210, 215, 240, 255), s.key);
-            x += kw + 4.f;
-
-            // Description — muted warm grey, slightly larger gap after
             ImVec2 dsz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, s.desc);
-            dl->AddText(font, fs, {x, y + pad_y},
-                        IM_COL32(130, 128, 145, 255), s.desc);
-            x += dsz.x + 16.f;
+            float  kw  = ksz.x + pad_x * 2.f;
+            if (x + kw + 4.f + dsz.x + 14.f > wpos.x + ww - 8.f) break;
+            dl->AddRectFilled({x, y+pad_y-1.f},{x+kw, y+kh},IM_COL32(36,36,54,255),3.f);
+            dl->AddRect({x, y+pad_y-1.f},{x+kw, y+kh},IM_COL32(85,85,115,200),3.f,0,1.f);
+            dl->AddText(font,fs,{x+pad_x,y+pad_y},IM_COL32(210,215,240,255),s.key);
+            x += kw + 4.f;
+            dl->AddText(font,fs,{x,y+pad_y},IM_COL32(125,123,140,255),s.desc);
+            x += dsz.x + 14.f;
         }
-        float line_h = ImGui::GetFontSize() + pad_y * 2.f;
-        ImGui::Dummy({1.f, line_h + 4.f});
+        ImGui::SetCursorScreenPos({wpos.x, cy});
+        ImGui::Dummy({ww, bar_h + 2.f});
     }
 }
 
@@ -950,10 +969,18 @@ bool CapstanApp::_transport_btn(const char* label, const ImVec4& bg,
 
 // ── Render dialog ─────────────────────────────────────────────────────────────
 void CapstanApp::_draw_render_dialog() {
-    ImGui::SetNextWindowSize({780,720}, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
-                            ImGuiCond_FirstUseEver, {0.5f,0.5f});
-    if (!ImGui::Begin("RENDER / QUEUE", &_show_render_dialog)) { ImGui::End(); return; }
+    // Pin to right side of screen, same level as main window content
+    {
+        ImVec2 vp = ImGui::GetMainViewport()->Size;
+        float w = std::min(780.f, vp.x * 0.55f);
+        float h = vp.y - 32.f;  // full height minus OS taskbar margin
+        ImGui::SetNextWindowSize({w, h}, ImGuiCond_Always);
+        ImGui::SetNextWindowPos({vp.x - w, 0.f}, ImGuiCond_Always);
+    }
+    ImGui::SetNextWindowBgAlpha(0.97f);
+    if (!ImGui::Begin("RENDER / QUEUE", &_show_render_dialog,
+                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        ImGui::End(); return; }
 
     float lpw = 400.f;
     ImGui::BeginChild("##render_settings",{lpw,0},false);
@@ -1223,7 +1250,6 @@ bool CapstanApp::_slider(const char* id, const char* label,
 {
     const float ROW_H = 32.f;
     float w = ImGui::GetContentRegionAvail().x;
-    float bar_x = 0.f;   // hit area spans full row
     float bar_w = w;
     float norm  = (mx > mn) ? (value - mn) / (mx - mn) : 0.f;
 
@@ -1267,7 +1293,6 @@ bool CapstanApp::_aslider(const char* id, const char* label,
 
     const float ROW_H = 32.f;
     float w     = ImGui::GetContentRegionAvail().x;
-    float bar_x = 0.f;   // hit area spans full row
     float bar_w = w;
     float norm  = (mx > mn) ? (show_val - mn) / (mx - mn) : 0.f;
 
@@ -1303,6 +1328,183 @@ bool CapstanApp::_aslider(const char* id, const char* label,
     return changed;
 }
 
+
+void CapstanApp::_draw_options() {
+    // Same position as render dialog — they share the right panel slot
+    {
+        ImVec2 vp = ImGui::GetMainViewport()->Size;
+        float w = std::min(520.f, vp.x * 0.38f);
+        float h = vp.y - 32.f;
+        ImGui::SetNextWindowSize({w, h}, ImGuiCond_Always);
+        ImGui::SetNextWindowPos({vp.x - w, 0.f}, ImGuiCond_Always);
+    }
+    ImGui::SetNextWindowBgAlpha(0.97f);
+    if (!ImGui::Begin("Performance Options", &_show_options,
+                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove
+                      | ImGuiWindowFlags_NoResize)) {
+        ImGui::End(); return;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+    ImGui::TextWrapped(
+        "These settings control how much audio is buffered in RAM. "
+        "Larger buffers tolerate slower drives. Changes take effect on next file load.");
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+
+    // ── Quick presets ─────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
+    ImGui::TextUnformatted("QUICK PRESETS"); ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    auto preset_btn = [&](const char* lbl, const char* tip, auto fn) {
+        if (_col_button(lbl, Col::bg3, Col::cyan, 110)) { fn(); _perf.save(); }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+        ImGui::SameLine(0, 6);
+    };
+    preset_btn("Fast SSD",    "Low latency, minimal buffer, multi-core render",
+               [&]{ _perf.apply_preset_fast_ssd(); });
+    preset_btn("Default",     "Balanced settings for most systems",
+               [&]{ _perf.apply_preset_default(); });
+    preset_btn("Slow HDD",    "Large buffers, sequential reads, avoids stutters on spinning drives",
+               [&]{ _perf.apply_preset_slow_hdd(); });
+    preset_btn("Low RAM",     "Minimal ring buffer, uses less memory at cost of seek latency",
+               [&]{ _perf.apply_preset_low_ram(); });
+    ImGui::NewLine();
+    ImGui::Spacing();
+
+    // ── Stream buffer ─────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
+    ImGui::TextUnformatted("STREAM BUFFER"); ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    bool changed = false;
+
+    ImGui::Text("Ring buffer size:  %.1f MB  (%d s)", _perf.ring_mb(), _perf.ring_seconds);
+    ImGui::SetNextItemWidth(-1);
+    changed |= ImGui::SliderInt("##ring", &_perf.ring_seconds, 5, 120, "%d s");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+        "Total audio held in RAM. One minute stereo 44.1kHz ≈ 21 MB.");
+
+    ImGui::Spacing();
+    ImGui::Text("Read-ahead:  %d s", _perf.ahead_seconds);
+    ImGui::SetNextItemWidth(-1);
+    changed |= ImGui::SliderInt("##ahead", &_perf.ahead_seconds, 2, 60, "%d s");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+        "How far ahead the IO thread reads. Increase if you hear gaps on slow drives.");
+
+    ImGui::Spacing();
+    ImGui::Text("IO chunk:  %d frames", _perf.io_chunk_frames);
+    ImGui::SetNextItemWidth(-1);
+    {
+        int chunk_kb = _perf.io_chunk_frames;
+        if (ImGui::SliderInt("##chunk", &chunk_kb, 512, 32768, "%d frames")) {
+            _perf.io_chunk_frames = chunk_kb; changed = true;
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+        "Frames per disk read. Larger helps spinning drives. Smaller reduces IO latency.");
+
+    ImGui::Spacing();
+
+    // ── DSP ───────────────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::cyan);
+    ImGui::TextUnformatted("DSP"); ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    ImGui::Text("Interpolation:");
+    ImGui::SameLine();
+    const char* interp_names[] = {"Linear (fast)", "Catmull-Rom (default)", "Sinc 6-tap (quality)"};
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::BeginCombo("##interp", interp_names[_perf.interpolation])) {
+        for (int i = 0; i < 3; ++i)
+            if (ImGui::Selectable(interp_names[i], _perf.interpolation == i)) {
+                _perf.interpolation = i; changed = true;
+            }
+        ImGui::EndCombo();
+    }
+
+    ImGui::Spacing();
+    ImGui::Text("Render threads:  %d", _perf.render_threads);
+    ImGui::SetNextItemWidth(-1);
+    changed |= ImGui::SliderInt("##rthreads", &_perf.render_threads, 1, 8, "%d");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+        "Threads used for offline render. Match your CPU core count for best speed.");
+
+    ImGui::Spacing();
+
+    if (changed) _perf.save();
+
+    ImGui::Separator();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.5f,.5f,.6f,1.f));
+    ImGui::TextUnformatted("Reload audio file to apply buffer changes.");
+    ImGui::PopStyleColor();
+
+    ImGui::End();
+}
+
+void CapstanApp::_draw_error_log() {
+    if (!_show_error_log) return;
+
+    ImGui::SetNextWindowSize({680, 420}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_FirstUseEver, {0.5f, 0.5f});
+    if (!ImGui::Begin("Error Log", &_show_error_log, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End(); return;
+    }
+
+    auto entries = ErrorLog::get().snapshot();
+
+    // Toolbar
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.5f,.5f,.6f,1.f));
+    ImGui::Text("%d entries", (int)entries.size());
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    if (ImGui::Button("Dismiss All")) ErrorLog::get().dismiss_all();
+    ImGui::SameLine();
+    if (ImGui::Button("Clear"))       ErrorLog::get().clear();
+    ImGui::Separator();
+
+    ImGui::BeginChild("##errlist", {0,0}, false);
+    for (int i = (int)entries.size()-1; i >= 0; --i) {
+        auto& e = entries[i];
+        ImGui::PushID(i);
+
+        // Timestamp
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.4f,.4f,.5f,1.f));
+        ImGui::TextUnformatted(e.timestamp.c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8);
+
+        // Error code badge
+        ImU32 badge_bg  = e.dismissed ? IM_COL32(35,35,45,200) : IM_COL32(80,15,15,240);
+        ImU32 badge_fg  = e.dismissed ? IM_COL32(100,100,120,200) : IM_COL32(255,100,100,255);
+        auto* dl = ImGui::GetWindowDrawList();
+        ImVec2 bp = ImGui::GetCursorScreenPos();
+        float  fs = ImGui::GetFontSize() * 0.88f;
+        ImFont* font = ImGui::GetFont();
+        const char* code_str = err_code_str(e.code);
+        ImVec2 csz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, code_str);
+        float bpad = 4.f;
+        dl->AddRectFilled({bp.x, bp.y+1}, {bp.x+csz.x+bpad*2, bp.y+csz.y+3},
+                          badge_bg, 3.f);
+        dl->AddRect({bp.x, bp.y+1}, {bp.x+csz.x+bpad*2, bp.y+csz.y+3},
+                    badge_fg, 3.f, 0, 1.f);
+        dl->AddText(font, fs, {bp.x+bpad, bp.y+2}, badge_fg, code_str);
+        ImGui::Dummy({csz.x+bpad*2+4.f, csz.y+4.f});
+        ImGui::SameLine(0, 6);
+
+        // Detail message
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            e.dismissed ? ImVec4(.4f,.4f,.5f,1.f) : ImVec4(.82f,.82f,.88f,1.f));
+        ImGui::TextUnformatted(e.message.empty() ? "(no detail)" : e.message.c_str());
+        ImGui::PopStyleColor();
+
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
 void CapstanApp::_draw_timeline() {
     // Keep anim cursor in sync with playback
     if (_engine.is_playing.load())

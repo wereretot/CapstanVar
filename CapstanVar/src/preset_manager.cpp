@@ -1,3 +1,4 @@
+#include "error_log.hpp"
 #include <cstdio>
 #include "preset_manager.hpp"
 #include <nlohmann/json.hpp>
@@ -447,14 +448,20 @@ bool PresetManager::export_preset(const std::string& path, const std::string& na
         std::ofstream f(path);
         f << j.dump(2);
         return f.good();
-    } catch(...) { return false; }
+    } catch(const std::exception& e) {
+    CV_ERR(PRESET_EXPORT_FAILED, path + ": " + e.what());
+    return false;
+}
 }
 
 std::optional<Preset> PresetManager::import_preset(const std::string& path) const {
     try {
         std::ifstream f(path);
         json j = json::parse(f);
-        if (j.value("__app__", "") != "CapstanVar") return std::nullopt;
+        if (j.value("__app__", "") != "CapstanVar") {
+            CV_ERR(PRESET_IMPORT_WRONG_APP, path + ": not a CapstanVar preset");
+            return std::nullopt;
+        }
         Preset pr;
         pr.name   = j.value("__name__", path);
         pr.params = ep_from_json(j);

@@ -1,3 +1,4 @@
+#include "error_log.hpp"
 #include <cstdio>
 #include "engine.hpp"
 #include <sndfile.h>
@@ -16,43 +17,80 @@ TapeEngine::TapeEngine(uint64_t seed)
 bool TapeEngine::load_file(const std::string& path) {
     SF_INFO info{};
     SNDFILE* sf = sf_open(path.c_str(), SFM_READ, &info);
-    if (!sf) return false;
-
-    // Read raw samples
-    std::vector<float> raw(info.frames * info.channels);
+    if (!sf) {
+        CV_ERR(FILE_OPEN_FAILED, std::string(path) + ": " + sf_strerror(nullptr));
+        return false;
+    }
+    std::vector<float> raw((size_t)info.frames * info.channels);
     sf_count_t got = sf_readf_float(sf, raw.data(), info.frames);
     sf_close(sf);
-    if (got <= 0) return false;
-
-    // Resample to 44100 if needed using SRC_LINEAR via libsndfile virtual IO
-    // For simplicity: load as-is and warn if rate != 44100
-    // Full SRC resampling would require libsamplerate; we assume 44100 input
-    // (the Python code also assumed 44100 after pydub conversion)
-
-    // Convert to stereo Frame[] normalised to ±1.0
-    int ch = info.channels;
-    int frames_in = (int)got;
-
-    std::lock_guard<std::mutex> g(lock);
-    audio_data.resize(frames_in);
-
-    float peak = 1e-9f;
-    for (int i = 0; i < frames_in; ++i) {
-        float l = raw[i * ch];
-        float r = (ch > 1) ? raw[i * ch + 1] : l;
-        audio_data[i] = {l, r};
-        peak = std::max(peak, std::max(std::abs(l), std::abs(r)));
+    if (got <= 0) {
+        CV_ERR(FILE_READ_FAILED, std::string(path) + ": sf_readf returned 0 frames");
+        return false;
     }
 
-    // Normalise: apply gain so peak = 0.707 (-3 dBFS, matching pydub -1 dBFS headroom)
-    float gain = 0.707f / peak;
-    for (auto& f : audio_data) f *= gain;
+    int ch = info.channels, n = (int)got;
 
-    total_samples = frames_in;
+    // Free old data BEFORE allocating new — prevents double-peak RSS usage
+    { std::vector<Frame> tmp; audio_data.swap(tmp); }  // releases old memory
+
+    std::vector<Frame> newdata(n);
+    float peak = 1e-9f;
+    for (int i = 0; i < n; ++i) {
+        float l = raw[i*ch], r = (ch>1)?raw[i*ch+1]:l;
+        newdata[i] = {l, r};
+        peak = std::max(peak, std::max(std::abs(l), std::abs(r)));
+    }
+    float gain = 0.707f / peak;
+    for (auto& f : newdata) f *= gain;
+    raw.clear(); raw.shrink_to_fit();  // free raw immediately
+
+    // Also open the StreamBuffer for seek/position tracking
+    stream._file_path = path;
+    stream.total_samples = n;
+
+    std::lock_guard<std::mutex> g(lock);
+    audio_data    = std::move(newdata);
+    total_samples = n;
     is_reversed   = false;
     params.is_reversed = false;
     reset_state();
     reset_position();
+    std::fprintf(stderr, "[load_file] loaded %d frames, audio_data.size=%zu\n",
+                 n, audio_data.size());
+    return true;
+}
+
+// Load for render: fills audio_data fully (render runs offline, RAM is acceptable)
+bool TapeEngine::load_file_for_render(const std::string& path) {
+    SF_INFO info{};
+    SNDFILE* sf = sf_open(path.c_str(), SFM_READ, &info);
+    if (!sf) {
+        CV_ERR(FILE_OPEN_FAILED, std::string(path) + ": " + sf_strerror(nullptr));
+        return false;
+    }
+    std::vector<float> raw((size_t)info.frames * info.channels);
+    sf_count_t got = sf_readf_float(sf, raw.data(), info.frames);
+    sf_close(sf);
+    if (got <= 0) {
+        CV_ERR(FILE_READ_FAILED, std::string(path) + ": sf_readf returned 0 frames");
+        return false;
+    }
+    int ch = info.channels, n = (int)got;
+    std::lock_guard<std::mutex> g(lock);
+    audio_data.resize(n);
+    float peak = 1e-9f;
+    for (int i = 0; i < n; ++i) {
+        float l = raw[i*ch], r = (ch>1)?raw[i*ch+1]:l;
+        audio_data[i] = {l,r};
+        peak = std::max(peak, std::max(std::abs(l),std::abs(r)));
+    }
+    float gain = 0.707f/peak;
+    for (auto& f : audio_data) f *= gain;
+    total_samples = n;
+    is_reversed   = false;
+    params.is_reversed = false;
+    reset_state(); reset_position();
     return true;
 }
 
@@ -149,7 +187,6 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
     std::lock_guard<std::mutex> g(lock);
 
     if (audio_data.empty()) return false;
-    // End-of-tape: forward hits end, reverse hits start
     if (!is_reversed && play_head >= total_samples - 1) return false;
     if ( is_reversed && play_head <= 0.0)               return false;
 
@@ -163,7 +200,10 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
 
     // Transport
     auto tr = transport.process(frames, current_time, play_head, total_samples, p);
-    if (tr.speeds.empty()) return false;
+    if (tr.speeds.empty()) {
+        CV_ERR(ENGINE_TRANSPORT_NO_SPEEDS, "TransportDynamics::process returned empty speeds");
+        return false;
+    }
 
     // Build read indices.
     // When reversed, advance BACKWARD through audio_data so play_head always
@@ -182,8 +222,7 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
         }
     }
 
-    // Catmull-Rom cubic Hermite interpolation — C1 continuous, no zipper noise
-    // at any tape speed. 4-19× smoother than linear at slow spindown speeds.
+    // Read audio via cubic interpolation
     for (int i = 0; i < frames; ++i) {
         double pos = std::clamp(read_indices[i], 0.0, (double)(total_samples - 1));
         out[i] = cubic_interp(audio_data.data(), total_samples, pos);

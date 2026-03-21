@@ -3,7 +3,7 @@
 // All persistent data lives under one root:
 //
 //   Linux/macOS : ~/.local/share/CapstanVar/
-//   Windows     : %APPDATA%\CapstanVar\
+//   Windows     : %APPDATA%/CapstanVar
 //
 // Sub-directories created on first run:
 //   projects/    — .cvproject files

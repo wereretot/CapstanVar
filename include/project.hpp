@@ -19,6 +19,7 @@
 #include <string>
 #include <filesystem>
 #include <fstream>
+#include "error_log.hpp"
 #include <optional>
 
 namespace fs = std::filesystem;
@@ -110,20 +111,34 @@ inline bool save_project(const std::string& path, const ProjectData& d) {
 
     try {
         std::ofstream f(path);
-        if (!f) return false;
+        if (!f) {
+            CV_ERR(PROJECT_SAVE_OPEN_FAILED, path);
+            return false;
+        }
         f << j.dump(2);
-        return f.good();
-    } catch (...) { return false; }
+        if (!f.good()) { CV_ERR(PROJECT_SAVE_WRITE_FAILED, path); return false; }
+        return true;
+    } catch (const std::exception& e) {
+        CV_ERR(PROJECT_SAVE_WRITE_FAILED, path + ": " + e.what());
+        return false;
+    }
 }
 
 // ── Load ──────────────────────────────────────────────────────────────────────
 inline std::optional<ProjectData> load_project(const std::string& path) {
     try {
         std::ifstream f(path);
-        if (!f) return std::nullopt;
-        json j; f >> j;
-        if (j.value("__format__","") != "CapstanVar Project")
+        if (!f) {
+            CV_ERR(PROJECT_LOAD_NOT_FOUND, path);
             return std::nullopt;
+        }
+        json j;
+        try { f >> j; }
+        catch (...) { CV_ERR(PROJECT_LOAD_PARSE_FAILED, path + ": JSON parse error"); return std::nullopt; }
+        if (j.value("__format__","") != "CapstanVar Project") {
+            CV_ERR(PROJECT_LOAD_WRONG_FORMAT, path + ": not a CapstanVar project file");
+            return std::nullopt;
+        }
 
         ProjectData d;
         d.project_name   = j.value("project_name", "");
@@ -150,7 +165,10 @@ inline std::optional<ProjectData> load_project(const std::string& path) {
                 d.audio_path_abs = rel_resolved.string();
         }
         return d;
-    } catch (...) { return std::nullopt; }
+    } catch (const std::exception& e) {
+        CV_ERR(PROJECT_LOAD_PARSE_FAILED, path + ": " + e.what());
+        return std::nullopt;
+    }
 }
 
 // ── Build relative path from project file to audio file ──────────────────────

@@ -23,7 +23,7 @@ struct TimelineWidget {
     double prev_cursor_pos   = -1.0; // set to -1 to force view reset on next draw
 
     // Drag state
-    struct Drag { std::string id; int key; double t0; float v0; };
+    struct Drag { std::string id; int key; double t0; float v0; float row_y = 0.f; };
     std::optional<Drag> dragging;
     bool time_cursor_dragging = false;
 
@@ -47,8 +47,38 @@ struct TimelineWidget {
             ImGuiCond_FirstUseEver);
 
         if (!ImGui::Begin("ANIMATION TIMELINE", &open,
-                          ImGuiWindowFlags_NoCollapse))
+                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove
+                          | ImGuiWindowFlags_NoTitleBar))
         { ImGui::End(); return; }
+
+        // ── Manual drag handle (NoTitleBar removes default, this replaces it) ──
+        {
+            ImVec2 wpos = ImGui::GetWindowPos();
+            float  ww   = ImGui::GetWindowWidth();
+            const float hh = 18.f;
+            auto* hdl_dl = ImGui::GetWindowDrawList();
+            ImVec2 hp0 = ImGui::GetCursorScreenPos();
+            hdl_dl->AddRectFilled(hp0, {hp0.x + ww, hp0.y + hh}, IM_COL32(28,35,45,255));
+            hdl_dl->AddLine({hp0.x, hp0.y + hh - 1.f},
+                {hp0.x + ww, hp0.y + hh - 1.f}, IM_COL32(50,70,55,200));
+            hdl_dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.88f,
+                {hp0.x + 8.f, hp0.y + 2.f}, IM_COL32(100,200,120,220),
+                ":: ANIMATION TIMELINE  (drag here to move)");
+            ImGui::SetCursorScreenPos({hp0.x + ww - 22.f, hp0.y + 1.f});
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.5f,.1f,.1f,.8f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(.8f,.35f,.35f,1.f));
+            if (ImGui::Button("x##tlclose", {20.f, hh - 2.f})) open = false;
+            ImGui::PopStyleColor(3);
+            ImGui::SetCursorScreenPos(hp0);
+            ImGui::InvisibleButton("##tl_grip", {ww - 24.f, hh});
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                ImVec2 md = ImGui::GetIO().MouseDelta;
+                ImGui::SetWindowPos({wpos.x + md.x, wpos.y + md.y});
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            ImGui::SetCursorScreenPos({hp0.x, hp0.y + hh + 2.f});
+        }
 
         // ── Toolbar ───────────────────────────────────────────────────────────
         ImGui::PushStyleColor(ImGuiCol_Text, {.5f,1.f,.5f,1.f});
@@ -88,6 +118,7 @@ struct TimelineWidget {
             ImGui::SameLine(0, 14);
         };
         key_hint("I",      "insert keyframe");
+        key_hint("Drag",   "move key (time+value)");
         key_hint("Del",    "delete selected");
         key_hint("Scroll", "zoom");
         key_hint("MMB",    "pan");
@@ -185,8 +216,19 @@ struct TimelineWidget {
         // Background
         dl->AddRectFilled(cpos, {cpos.x+csz.x, cpos.y+csz.y}, IM_COL32(20,20,28,255));
 
+        // Invisible button covers the whole canvas — this tells ImGui the
+        // mouse is consumed here, preventing window-drag when clicking keyframes.
+        ImGui::SetCursorScreenPos(cpos);
+        ImGui::InvisibleButton("##canvas_capture", csz,
+            ImGuiButtonFlags_MouseButtonLeft |
+            ImGuiButtonFlags_MouseButtonMiddle);
+        bool hovered  = ImGui::IsItemHovered();
+        bool canvas_active = ImGui::IsItemActive();
+        (void)canvas_active;
+        // Reset cursor so subsequent draw-list calls use the correct origin
+        ImGui::SetCursorScreenPos(cpos);
+
         // Zoom/pan (mouse wheel = zoom around cursor, MMB = pan)
-        bool hovered = ImGui::IsWindowHovered();
         if (hovered) {
             double span = view_end - view_start;
             if (span < 1.0) span = 44100.0;
@@ -199,7 +241,7 @@ struct TimelineWidget {
                 view_start = t_at_mouse - mx_frac * new_span;
                 view_end   = view_start + new_span;
             }
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+            if (!dragging && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
                 double dt = -(double)(io.MouseDelta.x / csz.x) * (view_end-view_start);
                 view_start += dt; view_end += dt;
             }
@@ -218,6 +260,10 @@ struct TimelineWidget {
         auto v_to_y = [&](float v, float mn, float mx, float row_top) -> float {
             float norm = (mx > mn) ? (v - mn) / (mx - mn) : 0.5f;
             return row_top + row_h * (1.f - std::clamp(norm, 0.f, 1.f));
+        };
+        auto y_to_v = [&](float y, float mn, float mx, float row_top) -> float {
+            float norm = 1.f - (y - row_top) / row_h;
+            return mn + std::clamp(norm, 0.f, 1.f) * (mx - mn);
         };
 
         // Time tick marks
@@ -246,6 +292,7 @@ struct TimelineWidget {
         // ── Draw each curve row ───────────────────────────────────────────────
         float row_y = cpos.y + 16.f;
         static std::string selected_id; static int selected_ki = -1;
+        bool any_key_near = false;  // set true if mouse is over any keyframe
 
         // Build parallel param-range lookup (same order as EngineParams)
         struct PRange { const char* id; float mn, mx; };
@@ -310,19 +357,22 @@ struct TimelineWidget {
                 dl->AddQuad({kx,ky-ks},{kx+ks,ky},{kx,ky+ks},{kx-ks,ky},
                              IM_COL32(255,255,255,120), 1.f);
 
-                // Click to select
-                if (hovered && !dragging &&
-                    std::abs(io.MousePos.x-kx)<8 && std::abs(io.MousePos.y-ky)<8) {
-                    ImGui::SetTooltip("%.4g  (%.2fs)", k.value, k.time/44100.0);
-                    if (ImGui::IsMouseClicked(0)) {
-                        selected_id=id; selected_ki=ki;
-                    }
-                    if (ImGui::IsMouseDragging(0)) {
+                // Hit test — generous radius for usability
+                bool near = std::abs(io.MousePos.x-kx)<9.f && std::abs(io.MousePos.y-ky)<9.f;
+                if (near) any_key_near = true;
+                if (hovered && near && !dragging) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+                    ImGui::SetTooltip("%.4g  (%.3fs)  drag to move",
+                        std::clamp(k.value, mn, mx), k.time/44100.0);
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        selected_id = id; selected_ki = ki;
+                        // Start drag immediately; kill cursor drag so it cannot interfere
+                        time_cursor_dragging = false;
                         dragging = {id, ki, k.time, k.value};
                     }
                 }
                 // Delete selected key with Del
-                if (ksel && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+                if (ksel && !dragging && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
                     anim.delete_key(id, ki);
                     selected_ki = -1; break;
                 }
@@ -330,21 +380,45 @@ struct TimelineWidget {
             row_y += row_h;
         }
 
-        // Handle drag
+        // Handle drag — moves both time (X) and value (Y)
         if (dragging) {
             auto it = anim.curves.find(dragging->id);
             if (it != anim.curves.end() && dragging->key < (int)it->second.keys.size()) {
                 float mn, mx;
                 get_range(dragging->id, mn, mx);
-                double new_t = std::max(0.0, x_to_t(io.MousePos.x));
-                // (vertical drag reserved for future use)
-                // Recalculate from cumulative delta
-                float delta_y = io.MousePos.y - (cpos.y + row_h * 0.5f);  // rough
-                (void)delta_y;
-                // Simple: just move horizontally (time), and let user set value via slider+I
-                it->second.keys[dragging->key].time = new_t;
-                it->second._sort();
-                if (!ImGui::IsMouseDown(0)) dragging.reset();
+
+                // Find which row this param is in so we can map Y to value
+                float drag_row_y = cpos.y + 16.f;
+                for (auto& rid : ids) {
+                    if (rid == dragging->id) break;
+                    if (anim.curves.count(rid) && anim.curves.at(rid).enabled)
+                        drag_row_y += row_h;
+                }
+
+                double new_t = std::clamp(x_to_t(io.MousePos.x), 0.0, total_samples);
+                float  new_v = y_to_v(io.MousePos.y, mn, mx, drag_row_y);
+
+                auto& key = it->second.keys[dragging->key];
+                key.time  = new_t;
+                key.value = std::clamp(new_v, mn, mx);
+
+                // Show live tooltip while dragging
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+                ImGui::SetTooltip("%.4g  (%.3fs)", key.value, key.time/44100.0);
+
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    // Sort keys by time on release (not mid-drag to keep index stable)
+                    it->second._sort();
+                    // Re-select: find the key we just placed by time proximity
+                    double released_t = key.time;
+                    selected_ki = 0;
+                    for (int i = 0; i < (int)it->second.keys.size(); ++i) {
+                        if (std::abs(it->second.keys[i].time - released_t) <
+                            std::abs(it->second.keys[selected_ki].time - released_t))
+                            selected_ki = i;
+                    }
+                    dragging.reset();
+                }
             } else { dragging.reset(); }
         }
 
@@ -373,15 +447,17 @@ struct TimelineWidget {
         if (cursor_near && !dragging) {
             if (ImGui::IsMouseClicked(0)) time_cursor_dragging = true;
         }
-        if (time_cursor_dragging) {
+        if (time_cursor_dragging && !dragging) {
             out_time_cursor = std::clamp(x_to_t(io.MousePos.x), 0.0, total_samples);
             if (!ImGui::IsMouseDown(0)) time_cursor_dragging = false;
+        } else if (dragging) {
+            time_cursor_dragging = false;
         }
-        // Clicking anywhere on canvas positions cursor (if not dragging a keyframe)
+        // Clicking anywhere on canvas positions cursor — but NOT if a keyframe is nearby
         if (hovered && ImGui::IsMouseClicked(0) && !dragging
-            && !time_cursor_dragging && !cursor_near) {
+            && !time_cursor_dragging && !cursor_near && !any_key_near) {
             out_time_cursor = std::clamp(x_to_t(io.MousePos.x), 0.0, total_samples);
-            time_cursor_dragging = true;  // start drag immediately for smooth scrub
+            time_cursor_dragging = true;
         }
 
         // Play head indicator (dim yellow)

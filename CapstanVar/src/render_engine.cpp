@@ -1,3 +1,4 @@
+#include "error_log.hpp"
 #include "render_engine.hpp"
 #include <sndfile.h>
 #include <cmath>
@@ -165,31 +166,20 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
 
     std::string display = opts.display_name.empty() ? opts.path : opts.display_name;
 
-    // ── Build a clean, direction-normalised render engine ─────────────────────
-    // Always work from forward audio data regardless of what the live engine has.
+    // ── Build render engine with fully loaded audio_data ────────────────────
+    // Live engine uses StreamBuffer (no full file in RAM). Render workers need
+    // the full file in audio_data for fast random-access slice rendering.
     auto eng = std::make_unique<TapeEngine>();
     {
-        // Hold lock only long enough to capture lightweight metadata and a pointer.
-        // We'll copy audio_data OUTSIDE the lock so the audio thread isn't
-        // blocked for the duration of a potentially large (100s of MB) memcpy.
-        std::vector<Frame>* src_ptr = nullptr;
-        bool src_reversed = false;
-        {
-            std::lock_guard<std::mutex> g(_src.lock);
-            eng->total_samples = _src.total_samples;
-            eng->params        = _src.params;
-            eng->is_reversed   = _src.is_reversed;
-            src_reversed       = _src.is_reversed;
-            src_ptr            = &_src.audio_data;
-            // Copy outside the lock — audio thread can run concurrently.
-            // audio_data is read-only during playback (never written after load).
-            eng->audio_data    = *src_ptr;  // still inside lock for safety first time
-        }
-        // audio_data is now our own copy; _src.lock is released
+        std::lock_guard<std::mutex> g(_src.lock);
+        eng->params      = _src.params;
+        eng->is_reversed = _src.is_reversed;
     }
-
-    // audio_data is always in forward order (never physically reversed).
-    // set_reverse() just sets the is_reversed flag; dsp_process reads backward.
+    if (!eng->load_file_for_render(_src.stream._file_path)) {
+        CV_ERR(RENDER_ENGINE_EMPTY, "Could not load audio for render");
+        if (job.done_cb) job.done_cb(false, "Audio file could not be read for render");
+        return;
+    }
     eng->is_reversed = opts.reverse;
     eng->params.is_reversed = opts.reverse;
 
@@ -205,6 +195,11 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
     if (!qs.print_through) eng->params.print_through = 0.f;
 
     const int total_samples = eng->total_samples;
+    if (total_samples == 0) {
+        CV_ERR(RENDER_ENGINE_EMPTY, "No audio loaded — nothing to render");
+        if (job.done_cb) job.done_cb(false, "No audio loaded");
+        return;
+    }
     const int total_blocks  = (total_samples + bs - 1) / bs;
 
     // Source RMS (before processing) for loudness matching
@@ -292,11 +287,21 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
         });
     };
 
+    // Determine sample rate for time conversion in animation
+    const bool has_anim = opts.anim.enabled && !opts.anim.curves.empty();
+
     if (opts.threads <= 1) {
-        // ── Single-threaded ───────────────────────────────────────────────────
+        // ── Single-threaded ───────────────────────────────────────────────
         std::vector<Frame> blk(bs);
         int done = 0;
         while (!_cancel_current.load()) {
+            // Apply animation curves at current play_head before each block
+            if (has_anim) {
+                opts.anim.apply(eng->params, eng->play_head);
+                // Always keep transport internals intact
+                eng->params.tape_speed_mult = 1.0f;
+                eng->params.motor_engage    = 1.0f;
+            }
             if (!eng->dsp_process(blk.data(), bs, os)) break;
             audio_out.insert(audio_out.end(), blk.begin(), blk.end());
             ++done;
@@ -398,6 +403,7 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
     }
 
     if (_cancel_current.load()) {
+        CV_ERR(RENDER_CANCELLED, display + ": render cancelled by user");
         _update_status([](RenderStatus& s){ s.phase = "Cancelled"; });
         _update_status([&](RenderStatus& s){
             s.completed.push_back({display, false, "Cancelled"});
@@ -538,7 +544,10 @@ void RenderEngine::_write_wav(const std::string& path,
     }
 
     SNDFILE* sf = sf_open(path.c_str(), SFM_WRITE, &info);
-    if (!sf) throw std::runtime_error(std::string("Cannot open: ") + sf_strerror(nullptr));
+    if (!sf) {
+        CV_ERR(RENDER_OUTPUT_OPEN_FAILED, path + ": " + sf_strerror(nullptr));
+        throw std::runtime_error("Cannot open output: " + path);
+    }
 
     std::vector<float> buf(data.size() * 2);
     if (dither && bit_depth < 32) {

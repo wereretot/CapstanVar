@@ -1,4 +1,5 @@
 #pragma once
+#include "param_anim.hpp"
 #include "engine.hpp"
 #include <string>
 #include <functional>
@@ -36,6 +37,9 @@ struct RenderOptions {
     bool        dc_block       = true;
     bool        normalize      = true;
     bool        match_loudness = false;
+    // Animation — optional. If anim.enabled and curves exist, params are
+    // updated per-block during render to match the animated values.
+    ParamAnim   anim;   // copied from _anim at enqueue time
 };
 
 // ── Live status (updated from render thread, read from UI thread) ─────────────

@@ -10,6 +10,8 @@
 #include "project.hpp"
 #include "app_dirs.hpp"
 #include "app_icon.hpp"
+#include "error_log.hpp"
+#include "perf_options.hpp"
 #include "timeline_widget.hpp"
 #include <SFML/Graphics.hpp>
 #include <string>
@@ -72,6 +74,9 @@ private:
 
     // Render dialog
     bool          _show_render_dialog  = false;
+    bool          _show_error_log      = false;
+    bool          _show_options        = false;
+    PerfOptions   _perf;
     bool          _show_close_confirm     = false;
     bool          _show_new_confirm       = false;
     bool          _pending_close_after_save = false;
@@ -124,6 +129,8 @@ private:
     void _new_project();
     void _update_window_title();
     void _draw_close_confirm();
+    void _draw_error_log();
+    void _draw_options();
     ProjectData _collect_project_data(const std::string& path) const;
 
     // Tape-machine style tall button (multi-line label, coloured)

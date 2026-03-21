@@ -1,5 +1,6 @@
 #pragma once
 #include "dsp_types.hpp"
+#include "stream_buffer.hpp"
 #include "mod_transport.hpp"
 #include "mod_magnetic.hpp"
 #include "mod_electronics.hpp"
@@ -13,9 +14,11 @@
 
 class TapeEngine {
 public:
-    // ── Audio data (loaded from file) ─────────────────────────────────────────
-    std::vector<Frame> audio_data;
+    // ── Audio source (ring-buffered — does not hold full file in RAM) ─────────
+    StreamBuffer       stream;
     int                total_samples = 0;
+    // Legacy alias kept for render engine compatibility (filled from stream on load)
+    std::vector<Frame> audio_data;  // used ONLY by render engine worker copies
 
     // ── Playback state ────────────────────────────────────────────────────────
     double      play_head    = 0.0;
@@ -34,8 +37,10 @@ public:
 
     explicit TapeEngine(uint64_t seed = 0);
 
-    // Load a WAV/FLAC/AIFF file via libsndfile; normalises to ±1.0 at 44100 Hz stereo
+    // Load for live playback — opens StreamBuffer, audio_data stays empty
     bool load_file(const std::string& path);
+    // Load fully into audio_data — used only by offline render workers
+    bool load_file_for_render(const std::string& path);
 
     // Flip audio_data in-place; resets DSP state if direction changed
     void set_reverse(bool want_reverse, bool force_reset = false);

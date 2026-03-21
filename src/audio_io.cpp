@@ -1,3 +1,4 @@
+#include "error_log.hpp"
 #include "audio_io.hpp"
 #include <cmath>
 #include <cstring>
@@ -16,7 +17,7 @@ bool AudioIO::_open_device() {
     auto* b = new AlsaBackend(); _backend = b;
     if (snd_pcm_open(&b->pcm,"default",SND_PCM_STREAM_PLAYBACK,0)<0)
         if (snd_pcm_open(&b->pcm,"plughw:0,0",SND_PCM_STREAM_PLAYBACK,0)<0)
-            { std::fprintf(stderr,"[AudioIO] ALSA: cannot open\n"); delete b; _backend=nullptr; return false; }
+            { CV_ERR(AUDIO_DEVICE_OPEN_FAILED, "ALSA: snd_pcm_open failed"); delete b; _backend=nullptr; return false; }
     snd_pcm_hw_params_t* hw; snd_pcm_hw_params_alloca(&hw);
     snd_pcm_hw_params_any(b->pcm,hw);
     snd_pcm_hw_params_set_access(b->pcm,hw,SND_PCM_ACCESS_RW_INTERLEAVED);
@@ -27,7 +28,7 @@ bool AudioIO::_open_device() {
     snd_pcm_uframes_t period=BLOCK_SIZE, buf=BLOCK_SIZE*4;
     snd_pcm_hw_params_set_period_size_near(b->pcm,hw,&period,nullptr);
     snd_pcm_hw_params_set_buffer_size_near(b->pcm,hw,&buf);
-    if (snd_pcm_hw_params(b->pcm,hw)<0) { _close_device(); return false; }
+    if (snd_pcm_hw_params(b->pcm,hw)<0) { CV_ERR(AUDIO_DEVICE_PARAMS_FAILED,"ALSA: hw_params failed"); _close_device(); return false; }
     snd_pcm_prepare(b->pcm);
     std::fprintf(stderr,"[AudioIO] ALSA ready %u Hz\n",rate);
     return true;
@@ -50,8 +51,8 @@ bool AudioIO::_write_block(const float* d,int frames) {
 struct PaBackend { PaStream* stream=nullptr; };
 static bool s_pa_init=false;
 bool AudioIO::_open_device() {
-    if(!s_pa_init){if(Pa_Initialize()!=paNoError){std::fprintf(stderr,"[AudioIO] PA init fail\n");return false;}s_pa_init=true;}
-    PaDeviceIndex dev=Pa_GetDefaultOutputDevice(); if(dev==paNoDevice) return false;
+    if(!s_pa_init){if(Pa_Initialize()!=paNoError){CV_ERR(AUDIO_DEVICE_OPEN_FAILED,"PortAudio: Pa_Initialize failed");return false;}s_pa_init=true;}
+    PaDeviceIndex dev=Pa_GetDefaultOutputDevice(); if(dev==paNoDevice){CV_ERR(AUDIO_DEVICE_OPEN_FAILED,"PortAudio: no default output device");return false;}
     auto* b=new PaBackend(); _backend=b;
     PaStreamParameters op{}; op.device=dev; op.channelCount=2; op.sampleFormat=paFloat32;
     op.suggestedLatency=Pa_GetDeviceInfo(dev)->defaultLowOutputLatency;
@@ -72,14 +73,69 @@ bool AudioIO::_write_block(const float* d,int frames) {
 }
 
 #elif defined(NAGRA_AUDIO_WINMM)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#include <mmreg.h>    // WAVE_FORMAT_IEEE_FLOAT
 #include <mmsystem.h>
 static constexpr int WINMM_BUFS=4;
 struct WinMMBackend{HWAVEOUT hwo=nullptr;WAVEHDR hdrs[WINMM_BUFS]={};std::vector<float> bufs[WINMM_BUFS];int cur=0;};
 bool AudioIO::_open_device(){auto* b=new WinMMBackend();_backend=b;WAVEFORMATEX wfx{};wfx.wFormatTag=WAVE_FORMAT_IEEE_FLOAT;wfx.nChannels=2;wfx.nSamplesPerSec=SR;wfx.wBitsPerSample=32;wfx.nBlockAlign=8;wfx.nAvgBytesPerSec=SR*8;if(waveOutOpen(&b->hwo,WAVE_MAPPER,&wfx,0,0,CALLBACK_NULL)!=MMSYSERR_NOERROR){delete b;_backend=nullptr;return false;}for(int i=0;i<WINMM_BUFS;++i){b->bufs[i].assign(BLOCK_SIZE*2,0.f);b->hdrs[i].lpData=(LPSTR)b->bufs[i].data();b->hdrs[i].dwBufferLength=BLOCK_SIZE*2*4;waveOutPrepareHeader(b->hwo,&b->hdrs[i],sizeof(WAVEHDR));waveOutWrite(b->hwo,&b->hdrs[i],sizeof(WAVEHDR));}return true;}
 void AudioIO::_close_device(){auto* b=static_cast<WinMMBackend*>(_backend);if(!b)return;if(b->hwo){waveOutReset(b->hwo);for(auto& h:b->hdrs)waveOutUnprepareHeader(b->hwo,&h,sizeof(WAVEHDR));waveOutClose(b->hwo);}delete b;_backend=nullptr;}
 bool AudioIO::_write_block(const float* d,int frames){auto* b=static_cast<WinMMBackend*>(_backend);if(!b||!b->hwo)return false;WAVEHDR& h=b->hdrs[b->cur];while(!(h.dwFlags&WHDR_DONE))Sleep(1);h.dwFlags&=~WHDR_DONE;memcpy(h.lpData,d,frames*8);h.dwBufferLength=frames*8;waveOutWrite(b->hwo,&h,sizeof(WAVEHDR));b->cur=(b->cur+1)%WINMM_BUFS;return true;}
+
+#elif defined(NAGRA_AUDIO_COREAUDIO)
+#include <AudioUnit/AudioUnit.h>
+#include <CoreAudio/CoreAudio.h>
+struct CABackend {
+    AudioUnit au = nullptr;
+    std::vector<float> ring;
+    std::atomic<int>   write_pos{0};
+    std::atomic<int>   read_pos{0};
+    static constexpr int RING = BLOCK_SIZE * 16;
+    static OSStatus render_cb(void* ref, AudioUnitRenderActionFlags*,
+                              const AudioTimeStamp*, UInt32, UInt32 nf,
+                              AudioBufferList* data) {
+        auto* b = static_cast<CABackend*>(ref);
+        float* out = (float*)data->mBuffers[0].mData;
+        int avail = (b->write_pos.load() - b->read_pos.load() + b->RING) % b->RING;
+        int fill  = std::min((int)nf * 2, avail);
+        int rp    = b->read_pos.load();
+        for (int i = 0; i < fill; ++i) out[i] = b->ring[(rp + i) % b->RING];
+        for (int i = fill; i < (int)nf * 2; ++i) out[i] = 0.f;
+        b->read_pos.store((rp + fill) % b->RING);
+        return noErr;
+    }
+};
+bool AudioIO::_open_device() {
+    auto* b = new CABackend(); b->ring.assign(CABackend::RING, 0.f); _backend = b;
+    AudioComponentDescription desc{kAudioUnitType_Output, kAudioUnitSubType_DefaultOutput,
+                                   kAudioUnitManufacturer_Apple, 0, 0};
+    AudioComponent comp = AudioComponentFindNext(nullptr, &desc);
+    if (!comp || AudioComponentInstanceNew(comp, &b->au) != noErr) { delete b; _backend=nullptr; return false; }
+    AURenderCallbackStruct cb{CABackend::render_cb, b};
+    AudioUnitSetProperty(b->au, kAudioUnitProperty_SetRenderCallback,
+                         kAudioUnitScope_Input, 0, &cb, sizeof(cb));
+    AudioStreamBasicDescription fmt{(Float64)SR, kAudioFormatLinearPCM,
+        kAudioFormatFlagIsFloat|kAudioFormatFlagIsPacked, 8, 1, 8, 2, 32, 0};
+    AudioUnitSetProperty(b->au, kAudioUnitProperty_StreamFormat,
+                         kAudioUnitScope_Input, 0, &fmt, sizeof(fmt));
+    AudioUnitInitialize(b->au); AudioOutputUnitStart(b->au);
+    std::fprintf(stderr, "[AudioIO] CoreAudio ready\n"); return true;
+}
+void AudioIO::_close_device() {
+    auto* b = static_cast<CABackend*>(_backend); if (!b) return;
+    if (b->au) { AudioOutputUnitStop(b->au); AudioUnitUninitialize(b->au); AudioComponentInstanceDispose(b->au); }
+    delete b; _backend = nullptr;
+}
+bool AudioIO::_write_block(const float* d, int frames) {
+    auto* b = static_cast<CABackend*>(_backend); if (!b) return false;
+    int wp = b->write_pos.load();
+    for (int i = 0; i < frames * 2; ++i) { b->ring[(wp + i) % CABackend::RING] = d[i]; }
+    b->write_pos.store((wp + frames * 2) % CABackend::RING);
+    return true;
+}
 
 #else
 bool  AudioIO::_open_device()                         { std::fprintf(stderr,"[AudioIO] null backend\n"); return true; }
@@ -99,7 +155,7 @@ AudioIO::~AudioIO() { close(); }
 bool AudioIO::open() {
     if (_open_flag.load()) return true;
     if (!_open_device())
-        std::fprintf(stderr,"[AudioIO] device unavailable — silent\n");
+        CV_ERR(AUDIO_DEVICE_OPEN_FAILED, "Audio device unavailable — running silently");
     // Start in stopped state at play speed
     _tape_speed    = 0.f;
     _target_speed  = 0.f;
@@ -279,6 +335,11 @@ void AudioIO::_dsp_thread() {
         // ── Run DSP ───────────────────────────────────────────────────────────
         bool ok = _engine.dsp_process(frame_buf.data(), BLOCK_SIZE);
         if (!ok) {
+            // Distinguish end-of-file (normal) from empty engine (error)
+            if (_engine.audio_data.empty())
+                CV_ERR(AUDIO_DSP_EMPTY_ENGINE, "dsp_process: no audio loaded");
+            else
+                CV_ERR(AUDIO_DSP_END_OF_FILE, "end of tape reached");
             _target_speed.store(0.f);
             _engine.is_playing.store(false);
             std::fill(interleaved.begin(), interleaved.end(), 0.f);
