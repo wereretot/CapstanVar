@@ -196,6 +196,11 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
             acc += tr.speeds[i] * p.tape_speed_mult;  // Then accumulate
         }
     }
+    
+    // Update play_head to the NEXT position (after the last sample read)
+    // This prevents re-reading the last sample of each block, which caused
+    // block boundary discontinuities (crackly/chopped audio)
+    play_head = std::clamp(acc, 0.0, (double)(total_samples - 1));
 
     // Read audio via StreamBuffer (Catmull-Rom interpolation)
     for (int i = 0; i < frames; ++i) {
@@ -295,9 +300,6 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
         }
     }
 
-    // play_head always tracks the actual tape position in the forward file.
-    // Clamp to [0, total_samples-1] in both directions.
-    play_head = std::clamp(read_indices.back(), 0.0, (double)(total_samples - 1));
     current_time += (float)frames * SR_F_INV;
 
     // Output limiter - two-stage: soft clip then hard peak limiter
