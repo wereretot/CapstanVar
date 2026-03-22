@@ -28,8 +28,11 @@ public:
     void stop();
     void shuttle_rewind(float speed_mult = 40.f);
     void shuttle_ff    (float speed_mult = 40.f);
+    void shuttle_faster(bool reverse);  // increase shuttle speed
     void stop_shuttle();
     void cycle_shuttle_speed();
+    
+    float shuttle_speed() const { return std::abs(_target_speed.load()); }  // current shuttle speed
 
     bool  is_open()      const { return _open_flag.load(); }
     bool  is_playing()   const;

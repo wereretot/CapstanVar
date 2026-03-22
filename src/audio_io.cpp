@@ -197,6 +197,19 @@ void AudioIO::shuttle_ff(float speed_mult) {
     _target_speed.store(+speed_mult);
     if (!_open_flag.load()) open();
 }
+void AudioIO::shuttle_faster(bool reverse) {
+    // Increase shuttle speed: 10x → 20x → 40x → 60x → 80x → 100x (max)
+    float cur = std::abs(_target_speed.load());
+    float next;
+    if (cur < 5.f)           next = 10.f;
+    else if (cur < 15.f)     next = 20.f;
+    else if (cur < 30.f)     next = 40.f;
+    else if (cur < 50.f)     next = 60.f;
+    else if (cur < 70.f)     next = 80.f;
+    else                     next = 100.f;  // max
+    float sign = reverse ? -1.f : +1.f;
+    _target_speed.store(sign * next);
+}
 void AudioIO::stop_shuttle() { stop(); }
 
 void AudioIO::cycle_shuttle_speed() {
@@ -282,6 +295,13 @@ void AudioIO::_dsp_thread() {
             }
         }
 
+        // ── IPS-based braking inertia ─────────────────────────────────────────
+        // Higher tape speeds = more momentum = longer to stop
+        // Scale brake time by current speed: at 1x (play speed) use normal rate,
+        // at 40x shuttle use ~3x longer braking distance
+        float ips_mult = std::max(1.f, std::abs(cur) / 15.f);
+        rate /= std::clamp(ips_mult, 1.f, 4.f);  // Cap at 4x slower braking
+
         // Apply ramp — move cur toward target at rate per sample, over one block
         float step = rate * BLOCK_SIZE;
         if (std::abs(diff) <= step)
@@ -336,7 +356,8 @@ void AudioIO::_dsp_thread() {
         bool ok = _engine.dsp_process(frame_buf.data(), BLOCK_SIZE);
         if (!ok) {
             // Distinguish end-of-file (normal) from empty engine (error)
-            if (_engine.audio_data.empty())
+            // In streaming mode, audio_data is empty but stream.is_open() is true
+            if (_engine.audio_data.empty() && !_engine.stream.is_open())
                 CV_ERR(AUDIO_DSP_EMPTY_ENGINE, "dsp_process: no audio loaded");
             else
                 CV_ERR(AUDIO_DSP_END_OF_FILE, "end of tape reached");

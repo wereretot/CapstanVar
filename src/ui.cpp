@@ -10,6 +10,7 @@ namespace fs = std::filesystem;
 #include <cstring>
 #include <algorithm>
 #include <string>
+#include "key_bindings.hpp"
 
 #ifdef NAGRA_HAS_TFD
 #include <tinyfiledialogs.h>
@@ -141,55 +142,80 @@ void CapstanApp::_process_events() {
 
             if (!typing) switch (ev.key.code) {
             // Space — play/stop (toggle)
-            case sf::Keyboard::Space:
+            case Keys::PLAY_TOGGLE:
                 if (rewinding || ffing) { _audio.stop(); }
                 else if (playing)       { _stop_transport(); }
                 else                    { _start_forward(); }
                 break;
 
             // Enter — play forward
-            case sf::Keyboard::Enter:
+            case Keys::PLAY_FWD_ALT:
                 if (!playing || _engine.is_reversed) _start_forward();
                 break;
 
-            // Backspace / R — play reverse
-            case sf::Keyboard::BackSpace:
-            case sf::Keyboard::R:
+            // Backspace / R — play reverse (alternative to Left arrow)
+            case Keys::PLAY_REV_ALT:
+            case Keys::PLAY_REV_ALT2:
                 if (!playing || !_engine.is_reversed) _start_reverse();
                 break;
 
-            // S / Escape — stop
-            case sf::Keyboard::S:
-            case sf::Keyboard::Escape:
-                _stop_transport();
+            // Down arrow / Escape — stop (also cancels shuttle operations)
+            case Keys::STOP:
+            case Keys::STOP_ALT:
+                if (rewinding || ffing || playing) _stop_transport();
                 break;
 
-            // Left arrow — rewind shuttle; Shift+Left — play in reverse
-            case sf::Keyboard::Left:
+            // Left arrow — play reverse; Shift+Left — rewind shuttle
+            // Pressing Left during rewind increases shuttle speed
+            case Keys::PLAY_REVERSE:
                 if (ev.key.shift) {
-                    // Shift+Left = play in reverse direction
-                    if (!playing || !_engine.is_reversed) _start_reverse();
-                } else {
+                    // Shift+Left = rewind shuttle (toggle)
                     if (rewinding) _audio.stop();
                     else           { _stop_transport(); _toggle_rewind(); }
+                } else {
+                    // Left = play reverse or increase rewind speed
+                    if (ffing) {
+                        _stop_transport(); _start_reverse();
+                    } else if (rewinding) {
+                        _audio.shuttle_faster(true);  // increase rewind speed
+                    } else if (playing && !_engine.is_reversed) {
+                        _start_reverse();
+                    } else if (!playing) {
+                        _start_reverse();
+                    }
                 }
                 break;
 
-            // Right arrow — fast forward; Shift+Right — play forward
-            case sf::Keyboard::Right:
+            // Right arrow — play forward; Shift+Right — fast forward shuttle
+            // Pressing Right during FF increases shuttle speed
+            case Keys::PLAY_FORWARD:
                 if (ev.key.shift) {
-                    // Shift+Right = play forward (mirror of Shift+Left)
-                    if (!playing || _engine.is_reversed) _start_forward();
-                } else {
+                    // Shift+Right = fast forward shuttle (toggle)
                     if (ffing) _audio.stop();
                     else       { _stop_transport(); _toggle_ff(); }
+                } else {
+                    // Right = play forward or increase FF speed
+                    if (rewinding) {
+                        _stop_transport(); _start_forward();
+                    } else if (ffing) {
+                        _audio.shuttle_faster(false);  // increase FF speed
+                    } else if (playing && _engine.is_reversed) {
+                        _start_forward();
+                    } else if (!playing) {
+                        _start_forward();
+                    }
                 }
                 break;
 
-            // Up/Down arrows — intentionally unbound (reserved for UI scroll)
+            // Up arrow — play forward (alternative to Right)
+            case Keys::PLAY_FORWARD_ALT:
+                if (rewinding || ffing) { _stop_transport(); _start_forward(); }
+                else if (playing && _engine.is_reversed) _start_forward();
+                else if (!playing) _start_forward();
+                break;
 
             // O — open audio file
-            case sf::Keyboard::O:
+            case Keys::OPEN_AUDIO:
                 if (ev.key.control && !ev.key.shift) _open_load_audio();
                 break;
 
@@ -197,15 +223,15 @@ void CapstanApp::_process_events() {
             } // end if(!typing) switch
 
             // Ctrl+O always works regardless of text focus
-            if (ev.key.control && ev.key.code == sf::Keyboard::O && !ev.key.shift)
+            if (ev.key.control && ev.key.code == Keys::OPEN_AUDIO && !ev.key.shift)
                 _open_load_audio();
             // Ctrl+S = save project; Ctrl+Shift+S = save as
-            if (ev.key.control && ev.key.code == sf::Keyboard::S) {
+            if (ev.key.control && ev.key.code == Keys::SAVE_PROJECT) {
                 if (ev.key.shift || _project_path.empty()) _open_save_project();
                 else _save_project(_project_path);
             }
             // Ctrl+Shift+O = open project
-            if (ev.key.control && ev.key.shift && ev.key.code == sf::Keyboard::O)
+            if (ev.key.control && ev.key.shift && ev.key.code == Keys::OPEN_PROJECT)
                 _open_load_project();
         }
     }
@@ -244,7 +270,7 @@ void CapstanApp::_draw_file_dialogs() {
                 } else {
                     // Check if user is trying to open a project file as audio
                     if (path.size() >= 10 && path.substr(path.size() - 10) == ".cvproject") {
-                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a project file. Use File → Open Project (Ctrl+Shift+O) instead.");
+                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a project file. Use File → Open Project (" + std::string(Keys::UI::OPEN_PROJECT) + ") instead.");
                         _fd_pending = FDPending::None;
                         return;
                     }
@@ -604,7 +630,7 @@ void CapstanApp::_draw_header() {
 
 // ── Preset bar ────────────────────────────────────────────────────────────────
 void CapstanApp::_draw_preset_bar() {
-    // Project buttons
+    // Left side: Project buttons
     {
         bool dirty = _project_dirty;
         std::string proj_label = "NEW";
@@ -615,16 +641,15 @@ void CapstanApp::_draw_preset_bar() {
         }
         if (_col_button(proj_label.c_str(), dirty?Col::orange_dim:Col::bg3,
                          dirty?Col::orange:Col::grey_lt, 130)) {
-            // Like Ctrl+S: save in-place if path known, else Save As
             if (_project_path.empty()) _open_save_project();
             else _save_project(_project_path);
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Save project  (Ctrl+S)\nRight-click: Save As");
+            ImGui::SetTooltip(("Save project  (" + std::string(Keys::UI::SAVE_PROJECT) + ")\nRight-click: Save As").c_str());
     }
     ImGui::SameLine();
     if (_col_button("Open Project", Col::bg3, Col::cyan, 115)) _open_load_project();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open project  (Ctrl+Shift+O)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(("Open project  (" + std::string(Keys::UI::OPEN_PROJECT) + ")").c_str());
     ImGui::SameLine(0, 4);
     if (_col_button("New", Col::bg3, Col::grey_lt, 44)) {
         if (_project_dirty) _show_new_confirm = true;
@@ -633,8 +658,18 @@ void CapstanApp::_draw_preset_bar() {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("New project  (clears all state)");
     ImGui::SameLine(0, 12);
     if (_col_button("LOAD", Col::green_dim, Col::green, 50)) _open_load_audio();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(("Load audio file  (" + std::string(Keys::UI::OPEN_AUDIO) + ")").c_str());
     ImGui::SameLine();
-
+    
+    // Centre spacer - push preset controls to right side
+    float win_w = ImGui::GetWindowWidth();
+    float left_w = 130.f + 115.f + 44.f + 12.f + 50.f + 30.f;  // project buttons + LOAD + spacing
+    float right_w = 50.f + 240.f + 45.f + 80.f + 50.f + 70.f + 70.f + 72.f;  // PRESET+dropdown+OXIDE+dropdown+buttons
+    float spacer = win_w - left_w - right_w - 20.f;
+    if (spacer > 10.f) ImGui::Dummy({spacer, 1});
+    ImGui::SameLine();
+    
+    // Right side: Preset selector and controls
     auto& builtins = _presets.builtin_presets();
     auto& sessions = _presets.session_presets();
     ImGui::Text("PRESET:"); ImGui::SameLine();
@@ -764,17 +799,14 @@ void CapstanApp::_draw_transport_controls() {
     // ── Row 1: main transport ─────────────────────────────────────────────────
     // REWIND  |  PLAY  |  STOP  |  REVERSE  |  FF  |  [render progress]
     {
-        static const float rwd_speeds[]={40.f,80.f,160.f};
-        static int rwd_tier=0, ff_tier=0;
-
         // REWIND
         if (rewinding) {
-            char lb[24]; std::snprintf(lb,sizeof(lb),"<< %.0fX",rwd_speeds[rwd_tier]);
+            float speed = _audio.shuttle_speed();
+            char lb[24]; std::snprintf(lb,sizeof(lb),"<< %.0fX", speed);
             ImVec4 flash = (std::fmod(ImGui::GetTime()*3.f,1.f)>.5f) ? Col::cyan : Col::cyan_dim;
             if (_transport_btn(lb, Col::cyan_dim, flash, SH_W, BTN_H))
-                { rwd_tier=(rwd_tier+1)%3; _audio.cycle_shuttle_speed(); }
+                _audio.stop();
         } else {
-            rwd_tier=0;
             if (_transport_btn("<<\nREWIND", Col::bg4, Col::cyan, SH_W, BTN_H))
                 { _stop_transport(); _toggle_rewind(); }
         }
@@ -811,12 +843,12 @@ void CapstanApp::_draw_transport_controls() {
 
         // FF
         if (ffing) {
-            char lb[24]; std::snprintf(lb,sizeof(lb),">> %.0fX",rwd_speeds[ff_tier]);
+            float speed = _audio.shuttle_speed();
+            char lb[24]; std::snprintf(lb,sizeof(lb),">> %.0fX", speed);
             ImVec4 flash = (std::fmod(ImGui::GetTime()*3.f,1.f)>.5f) ? Col::green : Col::green_dim;
             if (_transport_btn(lb, Col::green_dim, flash, SH_W, BTN_H))
-                { ff_tier=(ff_tier+1)%3; _audio.cycle_shuttle_speed(); }
+                _audio.stop();
         } else {
-            ff_tier=0;
             if (_transport_btn(">>\nFF", Col::bg4, Col::green, SH_W, BTN_H))
                 { _stop_transport(); _toggle_ff(); }
         }
@@ -907,14 +939,15 @@ void CapstanApp::_draw_transport_controls() {
 
         struct KV { const char* key; const char* desc; };
         static const KV shortcuts[] = {
-            {"Space",     "play/stop"},
-            {"S",         "stop"},
-            {"R",         "reverse"},
-            {"< / >",     "rwd/ff"},
-            {"Ctrl+O",    "load"},
-            {"Ctrl+S",    "save"},
-            {"Ctrl+Sh+S", "save as"},
-            {"Ctrl+Sh+O", "open proj"},
+            {Keys::UI::PLAY_TOGGLE,     "play/stop"},
+            {Keys::UI::STOP,            "stop"},
+            {Keys::UI::PLAY_REV_ALT,    "reverse"},
+            {Keys::UI::SHUTTLE_REV,     "rwd"},
+            {Keys::UI::SHUTTLE_FWD,     "ff"},
+            {Keys::UI::OPEN_AUDIO,      "load"},
+            {Keys::UI::SAVE_PROJECT,    "save"},
+            {Keys::UI::SAVE_PROJECT_AS, "save as"},
+            {Keys::UI::OPEN_PROJECT,    "open proj"},
         };
 
         float x = wpos.x + 8.f, y = cy + 2.f;
@@ -1944,11 +1977,19 @@ void CapstanApp::_stop_transport() {
 }
 void CapstanApp::_toggle_rewind() {
     if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
-    if (_audio.is_rewinding()) { _audio.stop(); return; }
-    _audio.shuttle_rewind(40.f);
+    // Only stop if already shuttling at significant speed (> 5x)
+    if (_audio.is_rewinding() && std::abs(_audio.shuttle_speed()) > 5.f) { 
+        _audio.stop(); 
+        return; 
+    }
+    _audio.shuttle_rewind(10.f);  // Start at 10x
 }
 void CapstanApp::_toggle_ff() {
     if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
-    if (_audio.is_ffing()) { _audio.stop(); return; }
-    _audio.shuttle_ff(40.f);
+    // Only stop if already shuttling at significant speed (> 5x)
+    if (_audio.is_ffing() && std::abs(_audio.shuttle_speed()) > 5.f) { 
+        _audio.stop(); 
+        return; 
+    }
+    _audio.shuttle_ff(10.f);  // Start at 10x
 }

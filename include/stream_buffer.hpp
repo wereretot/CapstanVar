@@ -71,8 +71,9 @@ public:
         // Synchronous prime fill so first dsp_process() call has data
         int prime_n = std::min(ahead_frames, total_samples);
         _prime(0, prime_n);
-        std::fprintf(stderr,"[StreamBuffer] opened %s: %d samples, ring=%d frames, ahead=%d frames, chunk=%d frames, valid %d..%d\n",
-            path.c_str(), total_samples, ring_frames, ahead_frames, io_chunk_frames, _valid_start, _valid_end);
+        float ring_mb = (float)(ring_frames * 2 * sizeof(float)) / (1024.f * 1024.f);
+        std::fprintf(stderr, "\033[92m[StreamBuffer] ✓ OPENED\033[0m %s: %d samples, ring=%.1fMB (%d frames), ahead=%d frames, chunk=%d\n",
+            path.c_str(), total_samples, ring_mb, ring_frames, ahead_frames, io_chunk_frames);
 
         _running.store(true);
         _io_thread = std::thread(&StreamBuffer::_io_loop, this);
@@ -114,10 +115,12 @@ public:
                 if (_valid(i)) return _slot(i);
             }
             // If nothing valid, return silence
+            // Log underruns sparingly - only first one and then every 1000
             static std::atomic<int> underrun_count{0};
-            if (++underrun_count % 100 == 1)
-                std::fprintf(stderr, "[StreamBuffer] UNDERRUN # %d at pos=%d valid=%d..%d ring_sz=%zu\n",
-                    underrun_count.load(), i0, _valid_start, _valid_end, _ring.size());
+            int uc = ++underrun_count;
+            if (uc == 1 || uc % 1000 == 1)
+                std::fprintf(stderr, "\n\033[91m[StreamBuffer] ✖ UNDERRUN #%d\033[0m at pos=%d valid=%d..%d ring_sz=%zu\n",
+                    uc, i0, _valid_start, _valid_end, _ring.size());
             return {0.f, 0.f};
         }
 
@@ -183,8 +186,9 @@ private:
     }
 
     // Synchronous fill from file_pos for count frames (called with _sf_mtx held)
-    void _decode(int file_pos, int count) {
-        if (!_sf || count <= 0 || file_pos >= total_samples) return;
+    // Returns number of frames actually decoded
+    int _decode(int file_pos, int count) {
+        if (!_sf || count <= 0 || file_pos >= total_samples) return 0;
         count = std::min(count, total_samples - file_pos);
         std::vector<float> raw((size_t)count * channels);
         sf_seek(_sf, file_pos, SEEK_SET);
@@ -194,18 +198,18 @@ private:
             float r = (channels > 1) ? raw[i * channels + 1] * norm_gain : l;
             _slot_ref(file_pos + i) = {l, r};
         }
-        _valid_end = std::max(_valid_end, file_pos + (int)got);
+        return (int)got;
     }
 
     void _prime(int from, int count) {
         std::lock_guard<std::mutex> g(_sf_mtx);
-        _decode(from, count);
+        int decoded = _decode(from, count);
         _valid_start = from;
+        _valid_end = from + decoded;
     }
 
     void _io_loop() {
-        int io_wakeups = 0;
-        int fills_done = 0;
+        int last_logged_fill_pct = -1;
         while (_running.load()) {
             {
                 std::unique_lock<std::mutex> lk(_cv_mtx);
@@ -213,12 +217,19 @@ private:
             }
             if (!_running.load()) break;
             
-            io_wakeups++;
-            if (io_wakeups % 100 == 1) {
+            // Log buffer status only when fill percentage changes significantly
+            static int counter = 0;
+            if (++counter % 500 == 1) {
                 int used = (_valid_end - _valid_start);
                 int fill_pct = (int)((float)used / _ring.size() * 100.f);
-                std::fprintf(stderr, "[StreamBuffer] IO: valid=%d..%d (%d frames, %d%% of %zu) rev=%d\n",
-                    _valid_start, _valid_end, used, fill_pct, _ring.size(), _reversed.load()?1:0);
+                if (fill_pct != last_logged_fill_pct) {
+                    last_logged_fill_pct = fill_pct;
+                    const char* status = fill_pct < 20 ? "⚠ LOW" : (fill_pct < 50 ? "• OK" : "✓ FULL");
+                    std::fprintf(stderr, "\r[StreamBuffer] %s  valid=%d..%d (%d%% of %zu) %s",
+                        status, _valid_start, _valid_end, fill_pct, _ring.size(),
+                        _reversed.load() ? "REV" : "FWD");
+                    fflush(stderr);
+                }
             }
 
             // Handle seek hint (window miss from DSP thread) - high priority
@@ -231,14 +242,21 @@ private:
                     int new_end = std::min(total_samples - 1, hint + 4096);
                     _valid_start = std::max(0, new_end - ahead_frames);
                     _valid_end   = new_end;
-                    _decode(_valid_start, _valid_end - _valid_start);
+                    int decoded = _decode(_valid_start, _valid_end - _valid_start);
+                    std::fprintf(stderr, "\n\033[93m[StreamBuffer] • SEEK REV to %d: valid=%d..%d (%d frames decoded)\033[0m\n",
+                        hint, _valid_start, _valid_end, decoded);
                 } else {
                     // Playing forward: need data AFTER hint position
                     int new_start = std::max(0, hint - 4096);
+                    int decode_n = std::min(ahead_frames, total_samples - new_start);
                     _valid_start = new_start;
                     _valid_end   = new_start;
-                    _decode(new_start, std::min(ahead_frames, total_samples - new_start));
+                    int decoded = _decode(new_start, decode_n);
+                    _valid_end = new_start + decoded;
+                    std::fprintf(stderr, "\n\033[93m[StreamBuffer] • SEEK FWD to %d: valid=%d..%d (%d frames decoded)\033[0m\n",
+                        hint, _valid_start, _valid_end, decoded);
                 }
+                fflush(stderr);
                 continue;
             }
 
@@ -249,12 +267,12 @@ private:
             if (rev) {
                 // Playing backward: fill BEFORE play position
                 int want_start = std::max(0, play - ahead_frames);
-                
+
                 // Keep safety margin
                 int safety_margin = io_chunk_frames * 2;
                 int target_start = std::max(0, play - safety_margin - ahead_frames / 2);
                 want_start = std::min(want_start, target_start);
-                
+
                 if (_valid_start > want_start) {
                     std::lock_guard<std::mutex> g(_sf_mtx);
                     int ring_sz = (int)_ring.size();
@@ -265,9 +283,8 @@ private:
                         int chunk = std::min({io_chunk_frames, _valid_start - want_start, free});
                         if (chunk > 0) {
                             int decode_start = std::max(0, _valid_start - chunk);
-                            _decode(decode_start, _valid_start - decode_start);
-                            _valid_start = decode_start;
-                            fills_done++;
+                            int decoded = _decode(decode_start, _valid_start - decode_start);
+                            if (decoded > 0) _valid_start = decode_start;
                         }
                     }
                 }
@@ -289,15 +306,11 @@ private:
                     if (free > 0) {
                         int chunk = std::min({io_chunk_frames, want_end - _valid_end, free});
                         if (chunk > 0) {
-                            _decode(_valid_end, chunk);
-                            fills_done++;
+                            int decoded = _decode(_valid_end, chunk);
+                            if (decoded > 0) _valid_end += decoded;
                         }
                     }
                 }
-            }
-            
-            if (fills_done > 0 && fills_done % 50 == 0) {
-                std::fprintf(stderr, "[StreamBuffer] IO stats: wakeups=%d fills=%d\n", io_wakeups, fills_done);
             }
         }
     }

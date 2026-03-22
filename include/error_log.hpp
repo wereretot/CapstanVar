@@ -115,6 +115,17 @@ inline const char* err_severity_icon(ErrSeverity s) {
     return "?";
 }
 
+// ANSI color codes for terminal output
+inline const char* err_severity_color(ErrSeverity s) {
+    switch (s) {
+    case ErrSeverity::Info:     return "\033[94m";   // Bright Blue
+    case ErrSeverity::Warning:  return "\033[93m";   // Bright Yellow
+    case ErrSeverity::Error:    return "\033[91m";   // Bright Red
+    }
+    return "\033[0m";
+}
+inline const char* COLOR_RESET = "\033[0m";
+
 struct ErrorEntry {
     ErrCode       code;
     ErrSeverity   severity;
@@ -138,9 +149,10 @@ public:
         e.message   = detail;
         e.timestamp = ts;
 
-        // Always log to stderr for terminal diagnostics
-        std::fprintf(stderr, "[CapstanVar %s] %s  %s  %s\n",
-                     err_severity_icon(severity), ts, err_code_str(code), detail.c_str());
+        // Always log to stderr for terminal diagnostics with colors
+        const char* color = err_severity_color(severity);
+        std::fprintf(stderr, "%s[CapstanVar %s] %s  %s  %s%s\n",
+                     color, err_severity_icon(severity), ts, err_code_str(code), detail.c_str(), COLOR_RESET);
 
         std::lock_guard<std::mutex> g(_mtx);
         _entries.push_back(std::move(e));
