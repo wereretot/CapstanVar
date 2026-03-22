@@ -2,7 +2,7 @@
 // ── Reel widget — standalone, isolated from all transport/button code ─────────
 // Rotation driven by play_head sample delta — captures ALL transport effects
 // (inertia, wow, flutter, motor health, shuttle speed) automatically.
-// Scale: 1 rotation per ~2 seconds at 15 IPS, regardless of file length.
+// Scale: 1 rotation per ~2 seconds at 15 IPS. Scales with IPS setting.
 
 #include <imgui.h>
 #include <cmath>
@@ -11,6 +11,7 @@
 struct ReelWidget {
     float  angle    = 0.f;
     double prev_pos = -1.0;   // -1 = uninitialised
+    float  ips_base  = 15.f;  // Current IPS setting for visual scaling
 
     // Call when a new file is loaded to prevent a large delta on first frame.
     void reset(double start_pos = 0.0) {
@@ -18,9 +19,12 @@ struct ReelWidget {
         angle    = 0.f;
     }
 
-    // Samples per reel rotation at 1× speed (15 IPS).
-    // 2 seconds × 44100 = 88200. Adjust for visual preference.
-    static constexpr float SAMPS_PER_ROT = 88200.f;   // ~2s per rotation at 15 IPS
+    // Set the base IPS for visual scaling (reels spin faster at higher IPS)
+    void set_ips(float ips) { ips_base = ips; }
+
+    // Samples per reel rotation at 15 IPS.
+    // 2 seconds × 44100 = 88200. Scales inversely with IPS.
+    static constexpr float SAMPS_PER_ROT_15IPS = 88200.f;
 
     void draw(double play_head,
               int    total_samples,
@@ -52,8 +56,14 @@ struct ReelWidget {
             }
         }
 
-        // Advance angle: fixed rad/sample regardless of file length
-        angle += delta_samps * (2.f * 3.14159f / SAMPS_PER_ROT);
+        // Scale rotation speed by IPS: higher IPS = fewer samples per rotation
+        // At 30 IPS: reel spins 2× faster (44100 samples/rot)
+        // At 7.5 IPS: reel spins 0.5× slower (176400 samples/rot)
+        float ips_scale = ips_base / 15.f;
+        float samps_per_rot = SAMPS_PER_ROT_15IPS / ips_scale;
+        
+        // Advance angle: scaled rad/sample based on IPS
+        angle += delta_samps * (2.f * 3.14159f / samps_per_rot);
         prev_pos = play_head;
 
         // ── Progress for fill level ───────────────────────────────────────────

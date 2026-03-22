@@ -242,15 +242,35 @@ void CapstanApp::_draw_file_dialogs() {
                 if (!fs::is_regular_file(path, _ec)) {
                     CV_ERR(FILE_NOT_FOUND, path);
                 } else {
+                    // Check if user is trying to open a project file as audio
+                    if (path.size() >= 10 && path.substr(path.size() - 10) == ".cvproject") {
+                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a project file. Use File → Open Project (Ctrl+Shift+O) instead.");
+                        _fd_pending = FDPending::None;
+                        return;
+                    }
+                    // Check if user is trying to open a preset file as audio
+                    if ((path.size() >= 5 && path.substr(path.size() - 5) == ".cvpr") ||
+                        (path.size() >= 5 && path.substr(path.size() - 5) == ".json")) {
+                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a preset file. Use File → Import Preset instead.");
+                        _fd_pending = FDPending::None;
+                        return;
+                    }
+                    
                     _audio.stop();
                     _loaded_file = path;
+                    // Apply current perf settings to stream buffer BEFORE opening
+                    // (StreamBuffer::open() uses these values to allocate the ring buffer)
+                    _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
+                    _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
+                    _engine.stream.io_chunk_frames = _perf.io_chunk_frames;
+                    std::fprintf(stderr, "[UI] Applying perf options: ring=%ds (%d frames), ahead=%ds (%d frames), chunk=%d frames\n",
+                        _perf.ring_seconds, _engine.stream.ring_frames,
+                        _perf.ahead_seconds, _engine.stream.ahead_frames,
+                        _perf.io_chunk_frames);
                     if (!_engine.load_file(path)) {
                         CV_ERR(FILE_OPEN_FAILED, path);
                         _loaded_file.clear();
                     } else {
-                        // Apply current perf settings to stream buffer
-                        _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
-                        _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
                         _reel.reset();
                         _project_dirty = true;
                         _update_window_title();
@@ -500,6 +520,8 @@ void CapstanApp::_draw_header() {
         ImVec2 c0 = ImGui::GetCursorScreenPos();
         // Reel animation — ground truth is play_head delta per frame.
         // Captures inertia, speed, direction, wow, flutter, all effects.
+        // Update reel rotation speed based on current IPS setting
+        _reel.set_ips(_display_params.ips_base);
         _reel.draw(
             _engine.play_head,
             _engine.total_samples,
@@ -1648,6 +1670,10 @@ void CapstanApp::_load_project(const std::string& path) {
         if (fs::is_regular_file(d->audio_path_abs, ec)) {
             _audio.stop();
             _loaded_file = d->audio_path_abs;
+            // Apply current perf settings to stream buffer BEFORE opening
+            _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
+            _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
+            _engine.stream.io_chunk_frames = _perf.io_chunk_frames;
             _engine.load_file(_loaded_file);
             _reel.reset();
             // Seek to saved position
@@ -1813,23 +1839,24 @@ void CapstanApp::_draw_close_confirm() {
 }
 
 void CapstanApp::_start_forward() {
-    if (_engine.audio_data.empty()) return;
+    // Check if audio is loaded (either via audio_data or StreamBuffer)
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     _audio.play_forward();
 }
 void CapstanApp::_start_reverse() {
-    if (_engine.audio_data.empty()) return;
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     _audio.play_reverse();
 }
 void CapstanApp::_stop_transport() {
     _audio.stop();
 }
 void CapstanApp::_toggle_rewind() {
-    if (_engine.audio_data.empty()) return;
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     if (_audio.is_rewinding()) { _audio.stop(); return; }
     _audio.shuttle_rewind(40.f);
 }
 void CapstanApp::_toggle_ff() {
-    if (_engine.audio_data.empty()) return;
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     if (_audio.is_ffing()) { _audio.stop(); return; }
     _audio.shuttle_ff(40.f);
 }

@@ -242,15 +242,35 @@ void CapstanApp::_draw_file_dialogs() {
                 if (!fs::is_regular_file(path, _ec)) {
                     CV_ERR(FILE_NOT_FOUND, path);
                 } else {
+                    // Check if user is trying to open a project file as audio
+                    if (path.size() >= 10 && path.substr(path.size() - 10) == ".cvproject") {
+                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a project file. Use File → Open Project (Ctrl+Shift+O) instead.");
+                        _fd_pending = FDPending::None;
+                        return;
+                    }
+                    // Check if user is trying to open a preset file as audio
+                    if ((path.size() >= 5 && path.substr(path.size() - 5) == ".cvpr") ||
+                        (path.size() >= 5 && path.substr(path.size() - 5) == ".json")) {
+                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a preset file. Use File → Import Preset instead.");
+                        _fd_pending = FDPending::None;
+                        return;
+                    }
+                    
                     _audio.stop();
                     _loaded_file = path;
+                    // Apply current perf settings to stream buffer BEFORE opening
+                    // (StreamBuffer::open() uses these values to allocate the ring buffer)
+                    _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
+                    _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
+                    _engine.stream.io_chunk_frames = _perf.io_chunk_frames;
+                    std::fprintf(stderr, "[UI] Applying perf options: ring=%ds (%d frames), ahead=%ds (%d frames), chunk=%d frames\n",
+                        _perf.ring_seconds, _engine.stream.ring_frames,
+                        _perf.ahead_seconds, _engine.stream.ahead_frames,
+                        _perf.io_chunk_frames);
                     if (!_engine.load_file(path)) {
                         CV_ERR(FILE_OPEN_FAILED, path);
                         _loaded_file.clear();
                     } else {
-                        // Apply current perf settings to stream buffer
-                        _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
-                        _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
                         _reel.reset();
                         _project_dirty = true;
                         _update_window_title();
@@ -419,6 +439,7 @@ void CapstanApp::_draw_frame() {
     _draw_timeline();
     _draw_error_log();
     if (_show_options) _draw_options();
+    _draw_notifications();  // Inline notifications below header
     ErrorLog::get().clear_new_flag();
 }
 
@@ -500,6 +521,8 @@ void CapstanApp::_draw_header() {
         ImVec2 c0 = ImGui::GetCursorScreenPos();
         // Reel animation — ground truth is play_head delta per frame.
         // Captures inertia, speed, direction, wow, flutter, all effects.
+        // Update reel rotation speed based on current IPS setting
+        _reel.set_ips(_display_params.ips_base);
         _reel.draw(
             _engine.play_head,
             _engine.total_samples,
@@ -689,6 +712,14 @@ void CapstanApp::_draw_transport_tab() {
 }
 void CapstanApp::_draw_magnetic_tab() {
     ImGui::BeginChild("##ms",{0,0},false); bool c=false;
+    
+    // ── Input ──────────────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::green);
+    ImGui::TextUnformatted("INPUT"); ImGui::PopStyleColor();
+    ImGui::Separator();
+    c|=_aslider("ingain","INPUT VOLUME",               _ui_params.input_gain,     0.f,  2.f,   Col::green,"Input gain/trim. Reduce for hot sources to prevent clipping.");
+    ImGui::Spacing();
+    
     c|=_aslider("drv",  "HEAD SATURATION",             _ui_params.drive,          1.f,  20.f,  Col::cyan,"Drive into coating. Higher = warmth then clip.");
     c|=_aslider("bias", "AC BIAS TUNING",              _ui_params.bias,           0.5f, 3.f,   Col::cyan,"Under=bright/distorted. Over=dark/clean.");
     c|=_aslider("rd",   "REPLAY DIFFERENTIATION",      _ui_params.replay_diff,    0.f,  1.f,   Col::cyan,"Head reads flux rate-of-change (+6dB/oct HF).");
@@ -1505,6 +1536,88 @@ void CapstanApp::_draw_error_log() {
     ImGui::EndChild();
     ImGui::End();
 }
+
+// ── Inline notifications (below header) ───────────────────────────────────────
+void CapstanApp::_draw_notifications() {
+    auto entries = ErrorLog::get().snapshot();
+    
+    // Find first undismissed entry
+    for (auto& e : entries) {
+        if (e.dismissed) continue;
+        
+        // Show notifications bar
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        float pad = 8.f;
+        float height = 0.f;
+        
+        // Calculate total height needed
+        for (auto& entry : entries) {
+            if (!entry.dismissed) height += 28.f;
+        }
+        if (height == 0.f) return;  // No undismissed entries
+        
+        height += pad * 2.f;
+        
+        ImGui::SetNextWindowPos({vp->Pos.x, vp->Pos.y + HEADER_H});
+        ImGui::SetNextWindowSize({vp->Size.x, height});
+        ImGui::SetNextWindowBgAlpha(0.95f);
+        
+        if (!ImGui::Begin("##notifications", nullptr,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+            ImGui::End(); return;
+        }
+        
+        ImGui::SetCursorPosY(pad);
+        
+        for (auto& entry : entries) {
+            if (entry.dismissed) continue;
+            
+            // Severity colors and icons
+            ImU32 icon_col, text_col, bg_col;
+            const char* icon = err_severity_icon(entry.severity);
+            
+            switch (entry.severity) {
+            case ErrSeverity::Info:
+                icon_col = IM_COL32(100,180,255,255);
+                text_col = IM_COL32(200,220,255,255);
+                bg_col   = IM_COL32(30,50,80,200);
+                break;
+            case ErrSeverity::Warning:
+                icon_col = IM_COL32(255,200,50,255);
+                text_col = IM_COL32(255,230,150,255);
+                bg_col   = IM_COL32(80,60,20,200);
+                break;
+            case ErrSeverity::Error:
+                icon_col = IM_COL32(255,80,80,255);
+                text_col = IM_COL32(255,180,180,255);
+                bg_col   = IM_COL32(80,20,20,200);
+                break;
+            }
+            
+            // Background
+            ImVec2 p_min = ImGui::GetCursorScreenPos();
+            ImVec2 p_max = {vp->Pos.x + vp->Size.x - pad*2, p_min.y + 24.f};
+            ImGui::GetWindowDrawList()->AddRectFilled(p_min, p_max, bg_col, 4.f);
+            
+            // Icon
+            ImVec2 icon_pos = {p_min.x + 10.f, p_min.y + 4.f};
+            ImGui::GetWindowDrawList()->AddText(nullptr, 18.f, icon_pos, icon_col, icon);
+            
+            // Message
+            char msg[512];
+            std::snprintf(msg, sizeof(msg), "%s  %s", err_code_str(entry.code),
+                         entry.message.empty() ? "" : entry.message.c_str());
+            ImVec2 text_pos = {p_min.x + 32.f, p_min.y + 5.f};
+            ImGui::GetWindowDrawList()->AddText(nullptr, 15.f, text_pos, text_col, msg);
+            
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 28.f);
+        }
+        
+        ImGui::End();
+        return;  // Only show one notification bar
+    }
+}
 void CapstanApp::_draw_timeline() {
     // Keep anim cursor in sync with playback
     if (_engine.is_playing.load())
@@ -1548,6 +1661,7 @@ void CapstanApp::_sync_params() {
     // Copy only user-controllable DSP fields — never touch transport internals.
     std::lock_guard<std::mutex> g(_engine.lock);
     EngineParams& ep = _engine.params;
+    ep.input_gain=_ui_params.input_gain;
     ep.ips_base=_ui_params.ips_base; ep.motor_health=_ui_params.motor_health;
     ep.motor_drag=_ui_params.motor_drag; ep.motor_boost=_ui_params.motor_boost;
     ep.wow_dep=_ui_params.wow_dep; ep.flutter_dep=_ui_params.flutter_dep;
@@ -1648,6 +1762,10 @@ void CapstanApp::_load_project(const std::string& path) {
         if (fs::is_regular_file(d->audio_path_abs, ec)) {
             _audio.stop();
             _loaded_file = d->audio_path_abs;
+            // Apply current perf settings to stream buffer BEFORE opening
+            _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
+            _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
+            _engine.stream.io_chunk_frames = _perf.io_chunk_frames;
             _engine.load_file(_loaded_file);
             _reel.reset();
             // Seek to saved position
@@ -1813,23 +1931,24 @@ void CapstanApp::_draw_close_confirm() {
 }
 
 void CapstanApp::_start_forward() {
-    if (_engine.audio_data.empty()) return;
+    // Check if audio is loaded (either via audio_data or StreamBuffer)
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     _audio.play_forward();
 }
 void CapstanApp::_start_reverse() {
-    if (_engine.audio_data.empty()) return;
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     _audio.play_reverse();
 }
 void CapstanApp::_stop_transport() {
     _audio.stop();
 }
 void CapstanApp::_toggle_rewind() {
-    if (_engine.audio_data.empty()) return;
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     if (_audio.is_rewinding()) { _audio.stop(); return; }
     _audio.shuttle_rewind(40.f);
 }
 void CapstanApp::_toggle_ff() {
-    if (_engine.audio_data.empty()) return;
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     if (_audio.is_ffing()) { _audio.stop(); return; }
     _audio.shuttle_ff(40.f);
 }

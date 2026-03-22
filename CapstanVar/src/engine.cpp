@@ -208,17 +208,18 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
     // Build read indices.
     // When reversed, advance BACKWARD through audio_data so play_head always
     // represents the true forward position in the original file.
+    // IMPORTANT: read_indices[0] = play_head (read AT current position first)
     std::vector<double> read_indices(frames);
     double acc = play_head;
     if (p.is_reversed) {
         for (int i = 0; i < frames; ++i) {
-            acc -= tr.speeds[i] * p.tape_speed_mult;  // backward at speed_mult
-            read_indices[i] = acc;
+            read_indices[i] = acc;  // Read first
+            acc -= tr.speeds[i] * p.tape_speed_mult;  // Then accumulate
         }
     } else {
         for (int i = 0; i < frames; ++i) {
-            acc += tr.speeds[i] * p.tape_speed_mult;
-            read_indices[i] = acc;
+            read_indices[i] = acc;  // Read first
+            acc += tr.speeds[i] * p.tape_speed_mult;  // Then accumulate
         }
     }
 

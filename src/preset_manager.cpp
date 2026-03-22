@@ -14,6 +14,7 @@ static void ep_to_json(json& j, const std::string& name, const EngineParams& e) 
     j["__name__"]    = name;
     j["oxide_type"]  = e.oxide_type;
     #define F(x) j[#x] = e.x
+    F(input_gain);
     F(ips_base); F(motor_health); F(motor_drag); F(motor_boost);
     F(wow_dep);  F(flutter_dep);  F(scrape_flutter); F(tension_load); F(dropout_rate);
     F(drive);    F(bias);         F(replay_diff);     F(asperities);   F(barkhausen);
@@ -26,6 +27,7 @@ static void ep_to_json(json& j, const std::string& name, const EngineParams& e) 
 static EngineParams ep_from_json(const json& j) {
     EngineParams e;
     auto get = [&](const char* k, float& v){ if(j.contains(k)) v = j[k].get<float>(); };
+    get("input_gain",e.input_gain);
     get("ips_base",e.ips_base); get("motor_health",e.motor_health);
     get("motor_drag",e.motor_drag); get("motor_boost",e.motor_boost);
     get("wow_dep",e.wow_dep); get("flutter_dep",e.flutter_dep);

@@ -131,6 +131,7 @@ private:
     void _draw_close_confirm();
     void _draw_error_log();
     void _draw_options();
+    void _draw_notifications();  // Inline error/warning notifications
     ProjectData _collect_project_data(const std::string& path) const;
 
     // Tape-machine style tall button (multi-line label, coloured)

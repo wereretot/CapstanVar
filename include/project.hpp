@@ -30,6 +30,7 @@ inline json ep_to_json_proj(const EngineParams& e) {
     json j;
     j["oxide_type"] = e.oxide_type;
     #define F(x) j[#x] = e.x
+    F(input_gain);
     F(ips_base); F(motor_health); F(motor_drag);  F(motor_boost);
     F(wow_dep);  F(flutter_dep);  F(scrape_flutter); F(tension_load); F(dropout_rate);
     F(drive);    F(bias);         F(replay_diff);  F(asperities);   F(barkhausen);
@@ -42,6 +43,7 @@ inline json ep_to_json_proj(const EngineParams& e) {
 inline EngineParams ep_from_json_proj(const json& j) {
     EngineParams e;
     auto g = [&](const char* k, float& v){ if(j.contains(k)) v=j[k].get<float>(); };
+    g("input_gain",e.input_gain);
     g("ips_base",e.ips_base); g("motor_health",e.motor_health);
     g("motor_drag",e.motor_drag); g("motor_boost",e.motor_boost);
     g("wow_dep",e.wow_dep); g("flutter_dep",e.flutter_dep);
@@ -91,6 +93,11 @@ struct ProjectData {
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 inline bool save_project(const std::string& path, const ProjectData& d) {
+    // Ensure .cvproject extension
+    std::string path_ext = path;
+    if (path_ext.length() < 10 || path_ext.substr(path_ext.length() - 10) != ".cvproject")
+        path_ext += ".cvproject";
+    
     json j;
     j["__format__"]      = "CapstanVar Project";
     j["__version__"]     = 2;
@@ -110,33 +117,52 @@ inline bool save_project(const std::string& path, const ProjectData& d) {
     j["anim_cursor"]     = d.anim_cursor;
 
     try {
-        std::ofstream f(path);
+        std::ofstream f(path_ext);
         if (!f) {
-            CV_ERR(PROJECT_SAVE_OPEN_FAILED, path);
+            CV_ERR(PROJECT_SAVE_OPEN_FAILED, path_ext);
             return false;
         }
         f << j.dump(2);
-        if (!f.good()) { CV_ERR(PROJECT_SAVE_WRITE_FAILED, path); return false; }
+        if (!f.good()) { CV_ERR(PROJECT_SAVE_WRITE_FAILED, path_ext); return false; }
         return true;
     } catch (const std::exception& e) {
-        CV_ERR(PROJECT_SAVE_WRITE_FAILED, path + ": " + e.what());
+        CV_ERR(PROJECT_SAVE_WRITE_FAILED, path_ext + ": " + e.what());
         return false;
     }
 }
 
 // ── Load ──────────────────────────────────────────────────────────────────────
 inline std::optional<ProjectData> load_project(const std::string& path) {
+    // Ensure .cvproject extension for loading
+    std::string path_ext = path;
+    if (path_ext.length() < 10 || path_ext.substr(path_ext.length() - 10) != ".cvproject")
+        path_ext += ".cvproject";
+    
     try {
-        std::ifstream f(path);
+        std::ifstream f(path_ext);
         if (!f) {
-            CV_ERR(PROJECT_LOAD_NOT_FOUND, path);
+            CV_ERR(PROJECT_LOAD_NOT_FOUND, path_ext);
             return std::nullopt;
         }
         json j;
-        try { f >> j; }
-        catch (...) { CV_ERR(PROJECT_LOAD_PARSE_FAILED, path + ": JSON parse error"); return std::nullopt; }
+        try {
+            f >> j;
+            if (j.is_null() || !j.is_object()) {
+                CV_ERR(PROJECT_LOAD_PARSE_FAILED, path_ext + ": empty or invalid JSON");
+                return std::nullopt;
+            }
+        }
+        catch (const json::parse_error& e) {
+            CV_ERR(PROJECT_LOAD_PARSE_FAILED, path_ext + ": JSON parse error - " + std::string(e.what()));
+            return std::nullopt;
+        }
+        catch (const std::exception& e) {
+            CV_ERR(PROJECT_LOAD_PARSE_FAILED, path_ext + ": read error - " + std::string(e.what()));
+            return std::nullopt;
+        }
+        
         if (j.value("__format__","") != "CapstanVar Project") {
-            CV_ERR(PROJECT_LOAD_WRONG_FORMAT, path + ": not a CapstanVar project file");
+            CV_ERR(PROJECT_LOAD_WRONG_FORMAT, path_ext + ": not a CapstanVar project file");
             return std::nullopt;
         }
 
@@ -158,7 +184,7 @@ inline std::optional<ProjectData> load_project(const std::string& path) {
 
         // Resolve audio path: try relative first, then absolute
         if (!d.audio_path_rel.empty()) {
-            fs::path proj_dir = fs::path(path).parent_path();
+            fs::path proj_dir = fs::path(path_ext).parent_path();
             fs::path rel_resolved = proj_dir / d.audio_path_rel;
             std::error_code ec;
             if (fs::is_regular_file(rel_resolved, ec))
@@ -166,7 +192,7 @@ inline std::optional<ProjectData> load_project(const std::string& path) {
         }
         return d;
     } catch (const std::exception& e) {
-        CV_ERR(PROJECT_LOAD_PARSE_FAILED, path + ": " + e.what());
+        CV_ERR(PROJECT_LOAD_PARSE_FAILED, path_ext + ": " + e.what());
         return std::nullopt;
     }
 }
