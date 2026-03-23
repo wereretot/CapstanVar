@@ -160,9 +160,30 @@ void TapeEngine::_saturate_oversampled(Frame* buf, int frames, int oversample,
 bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
     std::lock_guard<std::mutex> g(lock);
 
-    if (!stream.is_open()) return false;
-    if (!is_reversed && play_head >= total_samples - 1) return false;
-    if ( is_reversed && play_head <= 0.0)               return false;
+    // Check if we have audio data (either via streaming or loaded in memory)
+    bool has_stream = stream.is_open();
+    bool has_audio_data = !audio_data.empty();
+    
+    static int debug_call_count = 0;
+    if (++debug_call_count < 5) {
+        std::fprintf(stderr, "[DSP] call #%d: has_stream=%d has_audio_data=%d play_head=%.0f total_samples=%d audio_data.size()=%zu\n",
+            debug_call_count, has_stream?1:0, has_audio_data?1:0, play_head, total_samples, audio_data.size());
+    }
+    
+    if (!has_stream && !has_audio_data) {
+        if (debug_call_count < 5) std::fprintf(stderr, "[DSP] returning false: no audio source\n");
+        return false;
+    }
+    
+    // For streaming mode, check EOF
+    if (has_stream && !is_reversed && play_head >= total_samples - 1) return false;
+    if (has_stream && is_reversed && play_head <= 0.0) return false;
+    
+    // For in-memory mode (render), check EOF against audio_data size
+    if (!has_stream && has_audio_data) {
+        if (!is_reversed && play_head >= (double)audio_data.size() - 1) return false;
+        if (is_reversed && play_head <= 0.0) return false;
+    }
 
     EngineParams p = params;
     p.is_reversed  = is_reversed;
@@ -202,10 +223,22 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
     // block boundary discontinuities (crackly/chopped audio)
     play_head = std::clamp(acc, 0.0, (double)(total_samples - 1));
 
-    // Read audio via StreamBuffer (Catmull-Rom interpolation)
-    for (int i = 0; i < frames; ++i) {
-        double pos = std::clamp(read_indices[i], 0.0, (double)(total_samples - 1));
-        out[i] = stream.read(pos);
+    // Read audio via StreamBuffer (Catmull-Rom interpolation) for streaming mode,
+    // or via cubic interpolation from audio_data for render mode
+    if (stream.is_open()) {
+        // Streaming mode
+        for (int i = 0; i < frames; ++i) {
+            double pos = std::clamp(read_indices[i], 0.0, (double)(total_samples - 1));
+            out[i] = stream.read(pos);
+        }
+        // Notify stream of current position for IO thread window management
+        stream.notify_position((int)play_head, p.is_reversed);
+    } else {
+        // Render mode - read from audio_data using cubic interpolation
+        for (int i = 0; i < frames; ++i) {
+            double pos = std::clamp(read_indices[i], 0.0, (double)(audio_data.size() - 1));
+            out[i] = cubic_interp(audio_data.data(), (int)audio_data.size(), pos);
+        }
     }
 
     // Apply input gain/trim (before any processing to prevent internal clipping)
@@ -215,9 +248,6 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
             out[i].r *= p.input_gain;
         }
     }
-
-    // Notify stream of current position for IO thread window management
-    stream.notify_position((int)play_head, p.is_reversed);
 
     // DEBUG: Set to true to bypass all magnetic/electronics effects
     constexpr bool BYPASS_EFFECTS = false;

@@ -646,6 +646,10 @@ void CapstanApp::_draw_preset_bar() {
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(("Save project  (" + std::string(Keys::UI::SAVE_PROJECT) + ")\nRight-click: Save As").c_str());
+        // Right-click for Save As
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            _open_save_project();
+        }
     }
     ImGui::SameLine();
     if (_col_button("Open Project", Col::bg3, Col::cyan, 115)) _open_load_project();
