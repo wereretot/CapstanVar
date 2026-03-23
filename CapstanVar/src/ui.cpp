@@ -214,7 +214,7 @@ void CapstanApp::_process_events() {
 // ── File dialog management ────────────────────────────────────────────────────
 void CapstanApp::_open_load_audio() {
     _fd_load_audio.open_load("Load Tape File",
-        {".wav",".flac",".aif",".aiff",".ogg",".mp3"});
+        {".wav",".flac",".aif",".aiff",".ogg",".mp3",".opus",".wv",".mpc",".aac",".m4a",".wma"});
     _fd_pending = FDPending::LoadAudio;
 }
 void CapstanApp::_open_load_preset() {

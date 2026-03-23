@@ -61,10 +61,15 @@ FetchContent_Declare(nlohmann_json
 )
 
 # libsndfile
+# Enable additional audio codecs: FLAC, Vorbis, Opus, etc.
 set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING  OFF CACHE BOOL "" FORCE)
 set(ENABLE_CPACK   OFF CACHE BOOL "" FORCE)
+set(ENABLE_EXTERNAL_LIBS ON CACHE BOOL "" FORCE)  # Enable FLAC, Vorbis, Opus
+set(ENABLE_MPEG ON CACHE BOOL "" FORCE)           # Enable MP3 and other MPEG formats
+set(ENABLE_EXPERIMENTAL ON CACHE BOOL "" FORCE)   # Enable experimental codecs
+
 FetchContent_Declare(libsndfile
     GIT_REPOSITORY https://github.com/libsndfile/libsndfile.git
     GIT_TAG        1.2.2
