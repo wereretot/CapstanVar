@@ -27,6 +27,11 @@ struct PerfOptions {
     // Larger = less CPU, more latency. Smaller = lower latency, more CPU.
     int  block_size     = 1024;
 
+    // ── VU Meter ──────────────────────────────────────────────────────────────
+    // vu_response: VU meter response speed. 0=slow (classic VU), 1=medium, 2=fast (PPM)
+    // Higher values = faster attack and decay, more responsive but jittery
+    int  vu_response    = 1;    // 0=slow, 1=medium (default), 2=fast
+
     // ── Render defaults ───────────────────────────────────────────────────────
     int  render_threads = 1;
 
@@ -38,6 +43,7 @@ struct PerfOptions {
         interpolation   = 1;
         block_size      = 512;
         render_threads  = 4;
+        vu_response     = 2;  // Fast response for low-latency monitoring
     }
     void apply_preset_default() {
         ring_seconds    = 30;
@@ -46,6 +52,7 @@ struct PerfOptions {
         interpolation   = 1;
         block_size      = 1024;
         render_threads  = 1;
+        vu_response     = 1;  // Medium response
     }
     void apply_preset_slow_hdd() {
         ring_seconds    = 60;
@@ -54,6 +61,7 @@ struct PerfOptions {
         interpolation   = 0;
         block_size      = 2048;
         render_threads  = 1;
+        vu_response     = 0;  // Slow classic VU response
     }
     void apply_preset_low_ram() {
         ring_seconds    = 10;
@@ -62,6 +70,7 @@ struct PerfOptions {
         interpolation   = 1;
         block_size      = 1024;
         render_threads  = 1;
+        vu_response     = 1;  // Medium response
     }
 
     // ── RAM estimate in MB ────────────────────────────────────────────────────
@@ -78,6 +87,7 @@ struct PerfOptions {
         j["interpolation"]   = interpolation;
         j["block_size"]      = block_size;
         j["render_threads"]  = render_threads;
+        j["vu_response"]     = vu_response;
         std::ofstream f(AppDirs::config("options.json"));
         if (f) f << j.dump(2);
     }
@@ -92,6 +102,7 @@ struct PerfOptions {
             interpolation   = j.value("interpolation",   interpolation);
             block_size      = j.value("block_size",      block_size);
             render_threads  = j.value("render_threads",  render_threads);
+            vu_response     = j.value("vu_response",     vu_response);
         } catch (...) {}
     }
 };

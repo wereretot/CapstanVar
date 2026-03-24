@@ -128,6 +128,7 @@ private:
     void _load_project(const std::string& path);
     void _new_project();
     void _update_window_title();
+    void _draw_vu_meter(const ImVec2& center, float radius, float level, const char* label);
     void _draw_close_confirm();
     void _draw_error_log();
     void _draw_options();

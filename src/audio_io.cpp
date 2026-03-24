@@ -394,6 +394,44 @@ void AudioIO::_dsp_thread() {
             interleaved[i*2]   = frame_buf[i].l;
             interleaved[i*2+1] = frame_buf[i].r;
         }
+
+        // ── VU Metering — compute peak levels with decay ─────────────────────
+        float peak_l = 0.f, peak_r = 0.f;
+        for (int i = 0; i < BLOCK_SIZE; ++i) {
+            float al = std::abs(frame_buf[i].l);
+            float ar = std::abs(frame_buf[i].r);
+            if (al > peak_l) peak_l = al;
+            if (ar > peak_r) peak_r = ar;
+        }
+        // VU response speed: 0=slow (classic VU), 1=medium, 2=fast (PPM)
+        // Decay rates and hold times vary by setting
+        int response = _vu_response.load();
+        float decay_rate;
+        int hold_blocks;
+        switch (response) {
+            case 0:  // Slow - classic VU: 300ms attack, 1.5s decay
+                decay_rate = 0.003f;
+                hold_blocks = (SR / BLOCK_SIZE) / 3;  // ~333ms hold
+                break;
+            case 2:  // Fast - PPM style: 50ms attack, 200ms decay
+                decay_rate = 0.03f;
+                hold_blocks = (SR / BLOCK_SIZE) / 20;  // ~50ms hold
+                break;
+            default: // Medium - standard: 100ms attack, 500ms decay
+                decay_rate = 0.01f;
+                hold_blocks = (SR / BLOCK_SIZE) / 10;  // ~100ms hold
+                break;
+        }
+        _level_peak_l = std::max(_level_peak_l, peak_l);
+        _level_peak_r = std::max(_level_peak_r, peak_r);
+        if (++_level_decay_cnt >= hold_blocks) {
+            _level_decay_cnt = 0;
+            _level_peak_l = std::max(0.f, _level_peak_l - decay_rate);
+            _level_peak_r = std::max(0.f, _level_peak_r - decay_rate);
+        }
+        _level_left.store(_level_peak_l);
+        _level_right.store(_level_peak_r);
+
         _write_block(interleaved.data(), BLOCK_SIZE);
     }
 

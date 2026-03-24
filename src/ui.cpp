@@ -45,6 +45,9 @@ CapstanApp::CapstanApp()
     // Set window icon from embedded RGBA data
     _window.setIcon(AppIcon::WIDTH, AppIcon::HEIGHT, AppIcon::PIXELS);
 
+    // Sync VU meter response setting to audio engine
+    _audio.set_vu_response(_perf.vu_response);
+
     auto pr = _presets.find_builtin("Ampex 456 (30ips)");
     if (pr) _apply_preset(pr->params, pr->name);
     _audio.open();   // start DSP thread now; transport starts in Stopped/braking state
@@ -538,13 +541,21 @@ void CapstanApp::_draw_header() {
     ImGui::EndChild();
     ImGui::SameLine();
 
-    // ── Centre: title + reel animation ────────────────────────────────────────
+    // ── Centre: title + reel animation + VU meters ────────────────────────────
     float side_w  = 260.f + 10.f + 200.f + 10.f;
     float mid_w   = std::max(120.f, total_w - side_w);
     ImGui::BeginChild("##hdr_mid", {mid_w, HEADER_H}, false);
     {
-        // Reel visualisation using draw list
+        // ── Left VU Meter ─────────────────────────────────────────────────────
+        float meter_radius = HEADER_H * 0.42f;
+        float level_l = _audio.get_level_left();
         ImVec2 c0 = ImGui::GetCursorScreenPos();
+        ImVec2 vu_l_center = {c0.x + meter_radius + 8.f, c0.y + meter_radius + 4.f};
+        _draw_vu_meter(vu_l_center, meter_radius, level_l, "L");
+        ImGui::SetCursorScreenPos({c0.x + meter_radius * 2.f + 16.f, c0.y});
+
+        // Reel visualisation using draw list
+        ImVec2 reel_pos = ImGui::GetCursorScreenPos();
         // Reel animation — ground truth is play_head delta per frame.
         // Captures inertia, speed, direction, wow, flutter, all effects.
         // Update reel rotation speed based on current IPS setting
@@ -555,22 +566,28 @@ void CapstanApp::_draw_header() {
             _engine.is_reversed,
             std::abs(_audio.signed_tape_speed()) > 0.002f,
             _audio.signed_tape_speed(),
-            c0,
-            {mid_w, HEADER_H}
+            reel_pos,
+            {mid_w - (meter_radius * 2.f + 16.f) * 2.f, HEADER_H}
         );
 
+        // ── Right VU Meter ────────────────────────────────────────────────────
+        float level_r = _audio.get_level_right();
+        float right_vu_x = reel_pos.x + mid_w - (meter_radius * 2.f + 16.f) - meter_radius - 8.f;
+        ImVec2 vu_r_center = {right_vu_x, vu_l_center.y};
+        _draw_vu_meter(vu_r_center, meter_radius, level_r, "R");
+
         // Title (centred between reels)
-        ImGui::SetCursorScreenPos({c0.x, c0.y+2});
+        ImGui::SetCursorScreenPos({reel_pos.x, reel_pos.y+2});
         ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
         ImGui::SetWindowFontScale(1.3f);
         float tw = ImGui::CalcTextSize("CAPSTANVAR").x;
-        ImGui::SetCursorPosX((mid_w-tw)*0.5f);
+        ImGui::SetCursorPosX((mid_w - tw) * 0.5f);
         ImGui::Text("CAPSTANVAR");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, Col::grey);
         float sw = ImGui::CalcTextSize("ANALOG TAPE SIMULATOR").x;
-        ImGui::SetCursorPosX((mid_w-sw)*0.5f);
+        ImGui::SetCursorPosX((mid_w - sw) * 0.5f);
         ImGui::Text("ANALOG TAPE SIMULATOR");
         ImGui::PopStyleColor();
     }
@@ -1033,6 +1050,129 @@ bool CapstanApp::_transport_btn(const char* label, const ImVec4& bg,
     }
 
     return pressed;
+}
+
+// ── 180° Squared VU Meter ─────────────────────────────────────────────────────
+// Draws a semicircular VU meter with squared edges
+// Parameters:
+//   center: center point of the semicircle (bottom-center of the arc)
+//   radius: outer radius of the meter
+//   level: audio level 0.0-1.0 (linear, not dB)
+//   label: channel label ("L" or "R")
+void CapstanApp::_draw_vu_meter(const ImVec2& center, float radius, float level, const char* label) {
+    auto* dl = ImGui::GetWindowDrawList();
+
+    // Clamp level and convert to angle (0 to PI for 180 degrees)
+    float clamped = std::clamp(level, 0.f, 1.f);
+    // Apply logarithmic scaling for more realistic VU response (-60dB to 0dB)
+    float log_level = (clamped > 0.001f) ? (1.f + std::log10(clamped) / 3.f) : 0.f;
+    log_level = std::clamp(log_level, 0.f, 1.f);
+    // float angle = log_level * PI;  // 0 to 180 degrees in radians (unused, kept for reference)
+
+    // Scale thickness proportionally to radius (thicker for larger meters)
+    const float thickness = radius * 0.22f;
+    const float inner_r = radius - thickness;
+
+    // Background arc (full 180 degrees) - dark
+    const int segments = 32;
+    const float start_angle = PI;  // Start from left (180 degrees)
+
+    // Draw background arc (squared/rectangular style)
+    for (int i = 0; i < segments; ++i) {
+        float a0 = start_angle - (float)i * PI / segments;
+        float a1 = start_angle - (float)(i + 1) * PI / segments;
+
+        // Outer points
+        ImVec2 o0(center.x + std::cos(a0) * radius, center.y - std::sin(a0) * radius);
+        ImVec2 o1(center.x + std::cos(a1) * radius, center.y - std::sin(a1) * radius);
+        // Inner points
+        ImVec2 i0(center.x + std::cos(a0) * inner_r, center.y - std::sin(a0) * inner_r);
+        ImVec2 i1(center.x + std::cos(a1) * inner_r, center.y - std::sin(a1) * inner_r);
+
+        dl->AddQuad(o0, o1, i1, i0, IM_COL32(40, 40, 50, 200));
+    }
+
+    // Draw filled portion (active level) with color gradient
+    int filled_segments = (int)(segments * log_level);
+    if (filled_segments > 0) {
+        for (int i = 0; i < filled_segments; ++i) {
+            float a0 = start_angle - (float)i * PI / segments;
+            float a1 = start_angle - (float)(i + 1) * PI / segments;
+
+            ImVec2 o0(center.x + std::cos(a0) * radius, center.y - std::sin(a0) * radius);
+            ImVec2 o1(center.x + std::cos(a1) * radius, center.y - std::sin(a1) * radius);
+            ImVec2 i0(center.x + std::cos(a0) * inner_r, center.y - std::sin(a0) * inner_r);
+            ImVec2 i1(center.x + std::cos(a1) * inner_r, center.y - std::sin(a1) * inner_r);
+
+            // Color gradient: green -> yellow -> red
+            float t = (float)i / segments;
+            ImU32 col;
+            if (t < 0.5f) {
+                // Green to yellow
+                float s = t * 2.f;
+                col = IM_COL32((int)(100 + 155 * s), 255, 50, 255);
+            } else if (t < 0.75f) {
+                // Yellow to orange
+                float s = (t - 0.5f) * 4.f;
+                col = IM_COL32(255, (int)(255 - 100 * s), 50, 255);
+            } else {
+                // Orange to red
+                float s = (t - 0.75f) * 4.f;
+                col = IM_COL32(255, (int)(155 - 105 * s), 50, 255);
+            }
+
+            dl->AddQuadFilled(o0, o1, i1, i0, col);
+        }
+    }
+
+    // Draw needle/hand pointer (gauge style - triangle shaped)
+    float needle_angle = start_angle - log_level * PI;  // Point to current level
+    float needle_len = radius * 0.85f;
+    float needle_x = std::cos(needle_angle) * needle_len;
+    float needle_y = -std::sin(needle_angle) * needle_len;
+    ImVec2 needle_tip(center.x + needle_x, center.y + needle_y);
+    
+    // Calculate perpendicular direction for triangle width
+    float perp_angle = needle_angle - PI / 2.f;
+    float tri_half_width = radius * 0.08f;  // Triangle width at base
+    float perp_x = std::cos(perp_angle) * tri_half_width;
+    float perp_y = -std::sin(perp_angle) * tri_half_width;
+    
+    // Triangle base points (at center pivot edge)
+    float base_dist = inner_r * 0.35f;
+    float base_x = std::cos(needle_angle) * base_dist;
+    float base_y = -std::sin(needle_angle) * base_dist;
+    ImVec2 base_center(center.x + base_x, center.y + base_y);
+    ImVec2 base_left(base_center.x + perp_x, base_center.y + perp_y);
+    ImVec2 base_right(base_center.x - perp_x, base_center.y - perp_y);
+    
+    // Needle shadow (slightly offset triangle)
+    dl->AddTriangleFilled(
+        {needle_tip.x + 1.5f, needle_tip.y + 1.5f},
+        {base_left.x + 1.5f, base_left.y + 1.5f},
+        {base_right.x + 1.5f, base_right.y + 1.5f},
+        IM_COL32(0, 0, 0, 80));
+    
+    // Needle triangle (red with gradient effect via outline)
+    dl->AddTriangleFilled(needle_tip, base_left, base_right, IM_COL32(255, 90, 90, 255));
+    dl->AddTriangle(needle_tip, base_left, base_right, IM_COL32(200, 40, 40, 255), 1.5f);
+    
+    // Needle tip circle (smaller, integrated with triangle)
+    dl->AddCircleFilled(needle_tip, 2.5f, IM_COL32(255, 120, 120, 255));
+
+    // Draw center pivot circle (scaled proportionally) - on top of needle base
+    dl->AddCircleFilled(center, inner_r * 0.55f, IM_COL32(60, 60, 70, 255));
+    dl->AddCircle(center, inner_r * 0.55f, IM_COL32(100, 100, 120, 255), 0, 3.f);
+    
+    // Center pivot highlight
+    dl->AddCircleFilled(center, inner_r * 0.25f, IM_COL32(80, 80, 95, 255));
+
+    // Draw channel label (larger font for bigger meters)
+    ImFont* font = ImGui::GetFont();
+    float fs = radius * 0.5f;  // Scale font with meter size
+    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, label);
+    dl->AddText(font, fs, {center.x - ts.x * 0.5f, center.y - ts.y * 0.5f},
+                IM_COL32(220, 220, 230, 255), label);
 }
 
 // ── Render dialog ─────────────────────────────────────────────────────────────
@@ -1498,6 +1638,33 @@ void CapstanApp::_draw_options() {
     changed |= ImGui::SliderInt("##rthreads", &_perf.render_threads, 1, 8, "%d");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip(
         "Threads used for offline render. Match your CPU core count for best speed.");
+
+    ImGui::Spacing();
+
+    // ── VU Meter ──────────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::green);
+    ImGui::TextUnformatted("VU METER"); ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    ImGui::Text("Response speed:");
+    ImGui::SameLine();
+    const char* vu_names[] = {"Slow (Classic VU)", "Medium (Default)", "Fast (PPM)"};
+    const char* vu_tips[]  = {
+        "300ms attack, 1.5s decay - traditional analog VU meter behavior",
+        "100ms attack, 500ms decay - balanced response for most material",
+        "50ms attack, 200ms decay - fast PPM-style metering, shows transients"
+    };
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::BeginCombo("##vuresp", vu_names[_perf.vu_response])) {
+        for (int i = 0; i < 3; ++i)
+            if (ImGui::Selectable(vu_names[i], _perf.vu_response == i)) {
+                _perf.vu_response = i;
+                _audio.set_vu_response(i);
+                _perf.save();
+            }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", vu_tips[_perf.vu_response]);
 
     ImGui::Spacing();
 
