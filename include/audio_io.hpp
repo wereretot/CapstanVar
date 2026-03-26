@@ -28,8 +28,11 @@ public:
     void stop();
     void shuttle_rewind(float speed_mult = 40.f);
     void shuttle_ff    (float speed_mult = 40.f);
+    void shuttle_faster(bool reverse);  // increase shuttle speed
     void stop_shuttle();
     void cycle_shuttle_speed();
+    
+    float shuttle_speed() const { return std::abs(_target_speed.load()); }  // current shuttle speed
 
     bool  is_open()      const { return _open_flag.load(); }
     bool  is_playing()   const;
@@ -39,8 +42,24 @@ public:
     float current_speed_mult() const { return _current_speed_mult.load(); }
     float signed_tape_speed()  const { return _signed_tape_speed.load(); }
 
+    // ── VU Metering — peak levels with decay ─────────────────────────────────
+    float get_level_left()  const { return _level_left.load(); }
+    float get_level_right() const { return _level_right.load(); }
+
+    // ── VU Meter response speed — 0=slow, 1=medium, 2=fast ───────────────────
+    void set_vu_response(int response) { _vu_response.store(response); }
+    int  get_vu_response() const { return _vu_response.load(); }
+
 private:
     TapeEngine& _engine;
+
+    // ── VU Meter state — written by DSP thread, read by UI ───────────────────
+    std::atomic<float> _level_left{0.f};
+    std::atomic<float> _level_right{0.f};
+    float _level_peak_l = 0.f;  // DSP thread only
+    float _level_peak_r = 0.f;
+    int   _level_decay_cnt = 0;
+    std::atomic<int> _vu_response{1};  // 0=slow, 1=medium, 2=fast
 
     // The single signed target speed — UI thread writes, DSP thread reads.
     std::atomic<float> _target_speed{0.f};

@@ -15,49 +15,23 @@ TapeEngine::TapeEngine(uint64_t seed)
  }
 
 bool TapeEngine::load_file(const std::string& path) {
-    SF_INFO info{};
-    SNDFILE* sf = sf_open(path.c_str(), SFM_READ, &info);
-    if (!sf) {
-        CV_ERR(FILE_OPEN_FAILED, std::string(path) + ": " + sf_strerror(nullptr));
-        return false;
-    }
-    std::vector<float> raw((size_t)info.frames * info.channels);
-    sf_count_t got = sf_readf_float(sf, raw.data(), info.frames);
-    sf_close(sf);
-    if (got <= 0) {
-        CV_ERR(FILE_READ_FAILED, std::string(path) + ": sf_readf returned 0 frames");
+    // Open StreamBuffer first — uses current stream.ring_frames, stream.ahead_frames,
+    // stream.io_chunk_frames set by UI from PerfOptions
+    if (!stream.open(path)) {
+        CV_ERR(FILE_OPEN_FAILED, path + ": StreamBuffer::open failed");
         return false;
     }
 
-    int ch = info.channels, n = (int)got;
-
-    // Free old data BEFORE allocating new — prevents double-peak RSS usage
-    { std::vector<Frame> tmp; audio_data.swap(tmp); }  // releases old memory
-
-    std::vector<Frame> newdata(n);
-    float peak = 1e-9f;
-    for (int i = 0; i < n; ++i) {
-        float l = raw[i*ch], r = (ch>1)?raw[i*ch+1]:l;
-        newdata[i] = {l, r};
-        peak = std::max(peak, std::max(std::abs(l), std::abs(r)));
-    }
-    float gain = 0.707f / peak;
-    for (auto& f : newdata) f *= gain;
-    raw.clear(); raw.shrink_to_fit();  // free raw immediately
-
-    // Also open the StreamBuffer for seek/position tracking
-    stream._file_path = path;
-    stream.total_samples = n;
-
+    // Populate audio_data metadata for render engine compatibility
+    // (render engine uses load_file_for_render which fully loads)
     std::lock_guard<std::mutex> g(lock);
-    audio_data    = std::move(newdata);
-    total_samples = n;
+    total_samples = stream.total_samples;
     is_reversed   = false;
     params.is_reversed = false;
     reset_state();
     reset_position();
-    std::fprintf(stderr, "[load_file] loaded %d frames, audio_data.size=%zu\n",
-                 n, audio_data.size());
+    std::fprintf(stderr, "[load_file] StreamBuffer opened: %d samples, ring=%d frames, ahead=%d frames, chunk=%d frames\n",
+                 total_samples, stream.ring_frames, stream.ahead_frames, stream.io_chunk_frames);
     return true;
 }
 
@@ -186,9 +160,30 @@ void TapeEngine::_saturate_oversampled(Frame* buf, int frames, int oversample,
 bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
     std::lock_guard<std::mutex> g(lock);
 
-    if (audio_data.empty()) return false;
-    if (!is_reversed && play_head >= total_samples - 1) return false;
-    if ( is_reversed && play_head <= 0.0)               return false;
+    // Check if we have audio data (either via streaming or loaded in memory)
+    bool has_stream = stream.is_open();
+    bool has_audio_data = !audio_data.empty();
+    
+    static int debug_call_count = 0;
+    if (++debug_call_count < 5) {
+        std::fprintf(stderr, "[DSP] call #%d: has_stream=%d has_audio_data=%d play_head=%.0f total_samples=%d audio_data.size()=%zu\n",
+            debug_call_count, has_stream?1:0, has_audio_data?1:0, play_head, total_samples, audio_data.size());
+    }
+    
+    if (!has_stream && !has_audio_data) {
+        if (debug_call_count < 5) std::fprintf(stderr, "[DSP] returning false: no audio source\n");
+        return false;
+    }
+    
+    // For streaming mode, check EOF
+    if (has_stream && !is_reversed && play_head >= total_samples - 1) return false;
+    if (has_stream && is_reversed && play_head <= 0.0) return false;
+    
+    // For in-memory mode (render), check EOF against audio_data size
+    if (!has_stream && has_audio_data) {
+        if (!is_reversed && play_head >= (double)audio_data.size() - 1) return false;
+        if (is_reversed && play_head <= 0.0) return false;
+    }
 
     EngineParams p = params;
     p.is_reversed  = is_reversed;
@@ -206,111 +201,160 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
     }
 
     // Build read indices.
-    // When reversed, advance BACKWARD through audio_data so play_head always
+    // When reversed, advance BACKWARD so play_head always
     // represents the true forward position in the original file.
+    // IMPORTANT: read_indices[0] = play_head (read AT current position first)
     std::vector<double> read_indices(frames);
     double acc = play_head;
     if (p.is_reversed) {
         for (int i = 0; i < frames; ++i) {
-            acc -= tr.speeds[i] * p.tape_speed_mult;  // backward at speed_mult
-            read_indices[i] = acc;
+            read_indices[i] = acc;  // Read first
+            acc -= tr.speeds[i] * p.tape_speed_mult;  // Then accumulate
         }
     } else {
         for (int i = 0; i < frames; ++i) {
-            acc += tr.speeds[i] * p.tape_speed_mult;
-            read_indices[i] = acc;
+            read_indices[i] = acc;  // Read first
+            acc += tr.speeds[i] * p.tape_speed_mult;  // Then accumulate
+        }
+    }
+    
+    // Update play_head to the NEXT position (after the last sample read)
+    // This prevents re-reading the last sample of each block, which caused
+    // block boundary discontinuities (crackly/chopped audio)
+    play_head = std::clamp(acc, 0.0, (double)(total_samples - 1));
+
+    // Read audio via StreamBuffer (Catmull-Rom interpolation) for streaming mode,
+    // or via cubic interpolation from audio_data for render mode
+    if (stream.is_open()) {
+        // Streaming mode
+        for (int i = 0; i < frames; ++i) {
+            double pos = std::clamp(read_indices[i], 0.0, (double)(total_samples - 1));
+            out[i] = stream.read(pos);
+        }
+        // Notify stream of current position for IO thread window management
+        stream.notify_position((int)play_head, p.is_reversed);
+    } else {
+        // Render mode - read from audio_data using cubic interpolation
+        for (int i = 0; i < frames; ++i) {
+            double pos = std::clamp(read_indices[i], 0.0, (double)(audio_data.size() - 1));
+            out[i] = cubic_interp(audio_data.data(), (int)audio_data.size(), pos);
         }
     }
 
-    // Read audio via cubic interpolation
-    for (int i = 0; i < frames; ++i) {
-        double pos = std::clamp(read_indices[i], 0.0, (double)(total_samples - 1));
-        out[i] = cubic_interp(audio_data.data(), total_samples, pos);
+    // Apply input gain/trim (before any processing to prevent internal clipping)
+    if (p.input_gain != 1.0f) {
+        for (int i = 0; i < frames; ++i) {
+            out[i].l *= p.input_gain;
+            out[i].r *= p.input_gain;
+        }
     }
 
-    // Oversampled saturation or normal magnetic processing
-    if (oversample > 1) {
-        _saturate_oversampled(out, frames, oversample, p);
-        EngineParams p_os = p;
-        p_os.presaturated = true;
-        magnetic.process(out, frames,
-                         std::span<const Frame>(audio_data),
-                         std::span<const double>(read_indices), p_os);
-    } else {
-        magnetic.process(out, frames,
-                         std::span<const Frame>(audio_data),
-                         std::span<const double>(read_indices), p);
-    }
+    // DEBUG: Set to true to bypass all magnetic/electronics effects
+    constexpr bool BYPASS_EFFECTS = false;
+    
+    if constexpr (!BYPASS_EFFECTS) {
+        // Oversampled saturation or normal magnetic processing
+        // For streaming mode, we use a simplified magnetic path that doesn't require
+        // random access to the original audio_data (which is now empty)
+        if (oversample > 1) {
+            _saturate_oversampled(out, frames, oversample, p);
+            EngineParams p_os = p;
+            p_os.presaturated = true;
+            // In streaming mode, magnetic processing uses only the output buffer
+            magnetic.process(out, frames, {}, {}, p_os);
+        } else {
+            magnetic.process(out, frames, {}, {}, p);
+        }
 
-    electronics.process(out, frames, current_time, speed_factor, tr.sticky_drag, p);
+        electronics.process(out, frames, current_time, speed_factor, tr.sticky_drag, p);
+    }
 
     int n_out = frames;
 
-    // ── Scrape flutter ────────────────────────────────────────────────────────
-    float scrape_amt = p.scrape_flutter;
-    if (scrape_amt > 0.001f) {
-        float ips        = p.ips_base;
-        float scrape_hz  = std::clamp(2800.0f * (ips / 15.0f), 600.0f, 14000.0f);
-        float phase_inc  = scrape_hz / SR_F;
-        float alpha      = std::clamp(0.85f + scrape_amt * 0.1f, 0.85f, 0.97f);
-        float depth      = std::clamp(scrape_amt * 0.4f, 0.0f, 0.45f);
+    if constexpr (!BYPASS_EFFECTS) {
+        // ── Scrape flutter ────────────────────────────────────────────────────────
+        float scrape_amt = p.scrape_flutter;
+        if (scrape_amt > 0.001f) {
+            float ips        = p.ips_base;
+            float scrape_hz  = std::clamp(2800.0f * (ips / 15.0f), 600.0f, 14000.0f);
+            float phase_inc  = scrape_hz / SR_F;
+            float alpha      = std::clamp(0.85f + scrape_amt * 0.1f, 0.85f, 0.97f);
+            // Reduce depth at high IPS to prevent crispy artifacts
+            // At 1.7 IPS: full depth, at 30 IPS: ~40% depth
+            float ips_scale  = std::clamp(1.0f - (ips - 1.7f) / 60.f, 0.4f, 1.0f);
+            float depth      = std::clamp(scrape_amt * 0.15f * ips_scale, 0.0f, 0.12f);
 
-        static thread_local std::mt19937 sc_rng{42};
-        static thread_local std::normal_distribution<float> sc_norm{0.f, 0.3f};
-        static thread_local std::uniform_real_distribution<float> sc_uni{0.f, 1.f};
+            static thread_local std::mt19937 sc_rng{42};
+            static thread_local std::normal_distribution<float> sc_norm{0.f, 0.3f};
 
-        float y_prev = _scrape_y_prev;
-        float x_prev = _scrape_x_prev;
+            float y_prev = _scrape_y_prev;
+            float x_prev = _scrape_x_prev;
 
-        for (int i = 0; i < n_out; ++i) {
-            float ph = _scrape_phase + i * phase_inc;
-            float env = std::abs(std::sin(TWO_PI * ph)
-                              + std::sin(TWO_PI * ph * 1.031f + 0.7f) * 0.6f
-                              + std::sin(TWO_PI * ph * 0.973f + 1.3f) * 0.4f
-                              + sc_norm(sc_rng));
-            // Normalise: we just clamp rather than max-normalise per-sample
-            env = std::min(env, 2.0f) * 0.5f;
+            for (int i = 0; i < n_out; ++i) {
+                float ph = _scrape_phase + i * phase_inc;
+                // Smoother envelope - reduced high-frequency content
+                float env = 0.5f + 0.3f * std::sin(TWO_PI * ph)
+                               + 0.15f * std::sin(TWO_PI * ph * 1.031f + 0.7f)
+                               + 0.1f * std::sin(TWO_PI * ph * 0.973f + 1.3f)
+                               + sc_norm(sc_rng) * 0.3f;
+                env = std::abs(env);
 
-            float x_cur = out[i].l;
-            float y_cur = alpha * (y_prev + x_cur - x_prev);
-            float mod   = y_cur * env * depth;
-            out[i].l += mod;
-            out[i].r += mod * 0.85f;
-            x_prev = x_cur;
-            y_prev = y_cur;
+                float x_cur = out[i].l;
+                float y_cur = alpha * (y_prev + x_cur - x_prev);
+                float mod   = y_cur * env * depth;
+                out[i].l += mod;
+                out[i].r += mod * 0.85f;
+                x_prev = x_cur;
+                y_prev = y_cur;
+            }
+            _scrape_phase = std::fmod(_scrape_phase + n_out * phase_inc, 1.0f);
+            _scrape_y_prev = y_prev;
+            _scrape_x_prev = x_prev;
         }
-        _scrape_phase = std::fmod(_scrape_phase + n_out * phase_inc, 1.0f);
-        _scrape_y_prev = y_prev;
-        _scrape_x_prev = x_prev;
-    }
 
-    // Dropout mask
-    for (int i = 0; i < n_out; ++i) {
-        out[i] *= tr.dropout_mask[i];
-    }
-
-    // Fighting motors AM
-    float conflict = transport.last_conflict;
-    if (conflict > 0.05f) {
-        float am_freq  = 2.0f + conflict * 3.0f;
-        float am_depth = std::clamp(conflict * 0.7f, 0.0f, 0.8f);
+        // Dropout mask - apply directly (mask already has smooth fade in/out)
         for (int i = 0; i < n_out; ++i) {
-            float t   = current_time + (float)i * SR_F_INV;
-            float am  = 1.0f - am_depth * (0.5f + 0.5f * std::sin(TWO_PI * am_freq * t));
-            out[i] *= am;
+            out[i] *= tr.dropout_mask[i];
+        }
+
+        // Fighting motors AM
+        float conflict = transport.last_conflict;
+        if (conflict > 0.05f) {
+            float am_freq  = 2.0f + conflict * 3.0f;
+            float am_depth = std::clamp(conflict * 0.7f, 0.0f, 0.8f);
+            for (int i = 0; i < n_out; ++i) {
+                float t   = current_time + (float)i * SR_F_INV;
+                float am  = 1.0f - am_depth * (0.5f + 0.5f * std::sin(TWO_PI * am_freq * t));
+                out[i] *= am;
+            }
         }
     }
 
-    // play_head always tracks the actual tape position in the forward file.
-    // Clamp to [0, total_samples-1] in both directions.
-    play_head = std::clamp(read_indices.back(), 0.0, (double)(total_samples - 1));
     current_time += (float)frames * SR_F_INV;
 
-    // Output limiter (analog-style soft clip)
-    const float KNEE = 0.97f;
+    // Output limiter - two-stage: soft clip then hard peak limiter
+    // Stage 1: Analog-style soft clipping with tanh
+    const float KNEE = 0.92f;  // Slightly lower knee for earlier saturation
     for (int i = 0; i < n_out; ++i) {
         out[i].l = fast_tanh(out[i].l / KNEE) * KNEE;
         out[i].r = fast_tanh(out[i].r / KNEE) * KNEE;
+    }
+    
+    // Stage 2: Look-ahead peak limiter to catch any remaining peaks
+    // Find max peak in this block
+    float peak = 0.0f;
+    for (int i = 0; i < n_out; ++i) {
+        peak = std::max(peak, std::max(std::abs(out[i].l), std::abs(out[i].r)));
+    }
+    
+    // Apply gain reduction if needed (ceiling at 0.95 to allow for reconstruction)
+    const float CEILING = 0.95f;
+    if (peak > CEILING) {
+        float gain = CEILING / peak;
+        for (int i = 0; i < n_out; ++i) {
+            out[i].l *= gain;
+            out[i].r *= gain;
+        }
     }
 
     // Post-preset fade-in

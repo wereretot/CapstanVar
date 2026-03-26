@@ -197,6 +197,19 @@ void AudioIO::shuttle_ff(float speed_mult) {
     _target_speed.store(+speed_mult);
     if (!_open_flag.load()) open();
 }
+void AudioIO::shuttle_faster(bool reverse) {
+    // Increase shuttle speed: 10x → 20x → 40x → 60x → 80x → 100x (max)
+    float cur = std::abs(_target_speed.load());
+    float next;
+    if (cur < 5.f)           next = 10.f;
+    else if (cur < 15.f)     next = 20.f;
+    else if (cur < 30.f)     next = 40.f;
+    else if (cur < 50.f)     next = 60.f;
+    else if (cur < 70.f)     next = 80.f;
+    else                     next = 100.f;  // max
+    float sign = reverse ? -1.f : +1.f;
+    _target_speed.store(sign * next);
+}
 void AudioIO::stop_shuttle() { stop(); }
 
 void AudioIO::cycle_shuttle_speed() {
@@ -282,6 +295,13 @@ void AudioIO::_dsp_thread() {
             }
         }
 
+        // ── IPS-based braking inertia ─────────────────────────────────────────
+        // Higher tape speeds = more momentum = longer to stop
+        // Scale brake time by current speed: at 1x (play speed) use normal rate,
+        // at 40x shuttle use ~3x longer braking distance
+        float ips_mult = std::max(1.f, std::abs(cur) / 15.f);
+        rate /= std::clamp(ips_mult, 1.f, 4.f);  // Cap at 4x slower braking
+
         // Apply ramp — move cur toward target at rate per sample, over one block
         float step = rate * BLOCK_SIZE;
         if (std::abs(diff) <= step)
@@ -336,7 +356,8 @@ void AudioIO::_dsp_thread() {
         bool ok = _engine.dsp_process(frame_buf.data(), BLOCK_SIZE);
         if (!ok) {
             // Distinguish end-of-file (normal) from empty engine (error)
-            if (_engine.audio_data.empty())
+            // In streaming mode, audio_data is empty but stream.is_open() is true
+            if (_engine.audio_data.empty() && !_engine.stream.is_open())
                 CV_ERR(AUDIO_DSP_EMPTY_ENGINE, "dsp_process: no audio loaded");
             else
                 CV_ERR(AUDIO_DSP_END_OF_FILE, "end of tape reached");
@@ -373,6 +394,44 @@ void AudioIO::_dsp_thread() {
             interleaved[i*2]   = frame_buf[i].l;
             interleaved[i*2+1] = frame_buf[i].r;
         }
+
+        // ── VU Metering — compute peak levels with decay ─────────────────────
+        float peak_l = 0.f, peak_r = 0.f;
+        for (int i = 0; i < BLOCK_SIZE; ++i) {
+            float al = std::abs(frame_buf[i].l);
+            float ar = std::abs(frame_buf[i].r);
+            if (al > peak_l) peak_l = al;
+            if (ar > peak_r) peak_r = ar;
+        }
+        // VU response speed: 0=slow (classic VU), 1=medium, 2=fast (PPM)
+        // Decay rates and hold times vary by setting
+        int response = _vu_response.load();
+        float decay_rate;
+        int hold_blocks;
+        switch (response) {
+            case 0:  // Slow - classic VU: 300ms attack, 1.5s decay
+                decay_rate = 0.003f;
+                hold_blocks = (SR / BLOCK_SIZE) / 3;  // ~333ms hold
+                break;
+            case 2:  // Fast - PPM style: 50ms attack, 200ms decay
+                decay_rate = 0.03f;
+                hold_blocks = (SR / BLOCK_SIZE) / 20;  // ~50ms hold
+                break;
+            default: // Medium - standard: 100ms attack, 500ms decay
+                decay_rate = 0.01f;
+                hold_blocks = (SR / BLOCK_SIZE) / 10;  // ~100ms hold
+                break;
+        }
+        _level_peak_l = std::max(_level_peak_l, peak_l);
+        _level_peak_r = std::max(_level_peak_r, peak_r);
+        if (++_level_decay_cnt >= hold_blocks) {
+            _level_decay_cnt = 0;
+            _level_peak_l = std::max(0.f, _level_peak_l - decay_rate);
+            _level_peak_r = std::max(0.f, _level_peak_r - decay_rate);
+        }
+        _level_left.store(_level_peak_l);
+        _level_right.store(_level_peak_r);
+
         _write_block(interleaved.data(), BLOCK_SIZE);
     }
 

@@ -18,6 +18,12 @@
 #include <cstdio>
 #include <atomic>
 
+enum class ErrSeverity {
+    Info,     // ℹ - Informational messages
+    Warning,  // ⚠ - Potential issues
+    Error     // ✖ - Critical failures
+};
+
 enum class ErrCode {
     // Audio device
     AUDIO_DEVICE_OPEN_FAILED,
@@ -57,6 +63,18 @@ enum class ErrCode {
     ENGINE_OVERSAMPLE_ALLOC,
 };
 
+inline ErrSeverity err_code_severity(ErrCode c) {
+    // Warnings: non-critical issues that don't stop operation
+    switch (c) {
+    case ErrCode::AUDIO_DSP_END_OF_FILE:
+    case ErrCode::RENDER_CANCELLED:
+    case ErrCode::PROJECT_AUDIO_NOT_FOUND:
+        return ErrSeverity::Warning;
+    default:
+        return ErrSeverity::Error;
+    }
+}
+
 inline const char* err_code_str(ErrCode c) {
     switch (c) {
     case ErrCode::AUDIO_DEVICE_OPEN_FAILED:    return "AUDIO_DEVICE_OPEN_FAILED";
@@ -88,30 +106,53 @@ inline const char* err_code_str(ErrCode c) {
     return "UNKNOWN";
 }
 
+inline const char* err_severity_icon(ErrSeverity s) {
+    switch (s) {
+    case ErrSeverity::Info:     return "ℹ";
+    case ErrSeverity::Warning:  return "⚠";
+    case ErrSeverity::Error:    return "✖";
+    }
+    return "?";
+}
+
+// ANSI color codes for terminal output
+inline const char* err_severity_color(ErrSeverity s) {
+    switch (s) {
+    case ErrSeverity::Info:     return "\033[94m";   // Bright Blue
+    case ErrSeverity::Warning:  return "\033[93m";   // Bright Yellow
+    case ErrSeverity::Error:    return "\033[91m";   // Bright Red
+    }
+    return "\033[0m";
+}
+inline const char* COLOR_RESET = "\033[0m";
+
 struct ErrorEntry {
-    ErrCode     code;
-    std::string message;   // human-readable detail (path, system error, etc.)
-    std::string timestamp; // HH:MM:SS
-    bool        dismissed = false;
+    ErrCode       code;
+    ErrSeverity   severity;
+    std::string   message;   // human-readable detail (path, system error, etc.)
+    std::string   timestamp; // HH:MM:SS
+    bool          dismissed = false;
 };
 
 class ErrorLog {
 public:
     static ErrorLog& get() { static ErrorLog inst; return inst; }
 
-    void post(ErrCode code, const std::string& detail = "") {
+    void post(ErrCode code, const std::string& detail = "", ErrSeverity severity = ErrSeverity::Error) {
         auto now  = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm* tm = std::localtime(&now);
         char ts[12]; std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
                                    tm->tm_hour, tm->tm_min, tm->tm_sec);
         ErrorEntry e;
         e.code      = code;
+        e.severity  = severity;
         e.message   = detail;
         e.timestamp = ts;
 
-        // Always log to stderr for terminal diagnostics
-        std::fprintf(stderr, "[CapstanVar ERROR] %s  %s  %s\n",
-                     ts, err_code_str(code), detail.c_str());
+        // Always log to stderr for terminal diagnostics with colors
+        const char* color = err_severity_color(severity);
+        std::fprintf(stderr, "%s[CapstanVar %s] %s  %s  %s%s\n",
+                     color, err_severity_icon(severity), ts, err_code_str(code), detail.c_str(), COLOR_RESET);
 
         std::lock_guard<std::mutex> g(_mtx);
         _entries.push_back(std::move(e));
@@ -157,5 +198,5 @@ private:
     std::atomic<bool>       _has_new{false};
 };
 
-// Convenience macro — post to the global log
-#define CV_ERR(code, ...)  ErrorLog::get().post(ErrCode::code, ##__VA_ARGS__)
+// Convenience macro — post to the global log (defaults to Error severity)
+#define CV_ERR(code, ...)  ErrorLog::get().post(ErrCode::code, ##__VA_ARGS__, err_code_severity(ErrCode::code))

@@ -124,15 +124,27 @@ void MagneticPath::process(Frame* buf, int n,
     }
 
     // ── 4. REPLAY HEAD DIFFERENTIATION ───────────────────────────────────────
+    // Simulates replay head reading flux rate-of-change (+6dB/oct HF boost)
+    // This effect becomes harsher at high IPS because more HF content is present.
     float rd = p.replay_diff;
+    float ips = p.ips_base;
     if (rd > 0.0f && n > 1) {
         Frame prev = _last_proc;
+        // Reduce effect at high IPS to prevent crispy HF artifacts
+        // At 1.7 IPS: full effect, at 30 IPS: ~50% effect
+        float ips_scale = std::clamp(1.0f - (ips - 1.7f) / 60.f, 0.5f, 1.0f);
+        float rd_smooth = rd * 0.5f * ips_scale;  // Scale down effective amount
+        
         for (int i = 0; i < n; ++i) {
             Frame orig = buf[i];
+            // First-order difference (differentiation)
             Frame diff = {buf[i].l - prev.l, buf[i].r - prev.r};
-            buf[i].l   = orig.l * (1.0f - rd) + diff.l * rd;
-            buf[i].r   = orig.r * (1.0f - rd) + diff.r * rd;
-            prev        = orig;
+            // Blend original with differentiated signal
+            // Use a curved blend to reduce harshness at high settings
+            float blend = rd_smooth * (2.0f - rd_smooth);  // Soft curve
+            buf[i].l = orig.l * (1.0f - blend) + diff.l * blend;
+            buf[i].r = orig.r * (1.0f - blend) + diff.r * blend;
+            prev = orig;
         }
     }
     _last_proc = buf[n-1];

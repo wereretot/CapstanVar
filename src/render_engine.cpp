@@ -294,6 +294,8 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
         // ── Single-threaded ───────────────────────────────────────────────
         std::vector<Frame> blk(bs);
         int done = 0;
+        std::fprintf(stderr, "[Render] Starting single-threaded render: total_samples=%d, bs=%d, os=%d\n", 
+            total_samples, bs, os);
         while (!_cancel_current.load()) {
             // Apply animation curves at current play_head before each block
             if (has_anim) {
@@ -302,11 +304,18 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
                 eng->params.tape_speed_mult = 1.0f;
                 eng->params.motor_engage    = 1.0f;
             }
-            if (!eng->dsp_process(blk.data(), bs, os)) break;
+            bool ok = eng->dsp_process(blk.data(), bs, os);
+            if (!ok) {
+                std::fprintf(stderr, "[Render] dsp_process returned false at done=%d, play_head=%.0f\n", 
+                    done, eng->play_head);
+                break;
+            }
             audio_out.insert(audio_out.end(), blk.begin(), blk.end());
             ++done;
             if (done % 16 == 0) report_progress(done);
         }
+        std::fprintf(stderr, "[Render] Render complete: done=%d blocks, audio_out.size()=%zu\n", 
+            done, audio_out.size());
         report_progress(done);
 
     } else {

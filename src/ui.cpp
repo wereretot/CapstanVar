@@ -10,6 +10,7 @@ namespace fs = std::filesystem;
 #include <cstring>
 #include <algorithm>
 #include <string>
+#include "key_bindings.hpp"
 
 #ifdef NAGRA_HAS_TFD
 #include <tinyfiledialogs.h>
@@ -43,6 +44,9 @@ CapstanApp::CapstanApp()
 
     // Set window icon from embedded RGBA data
     _window.setIcon(AppIcon::WIDTH, AppIcon::HEIGHT, AppIcon::PIXELS);
+
+    // Sync VU meter response setting to audio engine
+    _audio.set_vu_response(_perf.vu_response);
 
     auto pr = _presets.find_builtin("Ampex 456 (30ips)");
     if (pr) _apply_preset(pr->params, pr->name);
@@ -141,55 +145,80 @@ void CapstanApp::_process_events() {
 
             if (!typing) switch (ev.key.code) {
             // Space — play/stop (toggle)
-            case sf::Keyboard::Space:
+            case Keys::PLAY_TOGGLE:
                 if (rewinding || ffing) { _audio.stop(); }
                 else if (playing)       { _stop_transport(); }
                 else                    { _start_forward(); }
                 break;
 
             // Enter — play forward
-            case sf::Keyboard::Enter:
+            case Keys::PLAY_FWD_ALT:
                 if (!playing || _engine.is_reversed) _start_forward();
                 break;
 
-            // Backspace / R — play reverse
-            case sf::Keyboard::BackSpace:
-            case sf::Keyboard::R:
+            // Backspace / R — play reverse (alternative to Left arrow)
+            case Keys::PLAY_REV_ALT:
+            case Keys::PLAY_REV_ALT2:
                 if (!playing || !_engine.is_reversed) _start_reverse();
                 break;
 
-            // S / Escape — stop
-            case sf::Keyboard::S:
-            case sf::Keyboard::Escape:
-                _stop_transport();
+            // Down arrow / Escape — stop (also cancels shuttle operations)
+            case Keys::STOP:
+            case Keys::STOP_ALT:
+                if (rewinding || ffing || playing) _stop_transport();
                 break;
 
-            // Left arrow — rewind shuttle; Shift+Left — play in reverse
-            case sf::Keyboard::Left:
+            // Left arrow — play reverse; Shift+Left — rewind shuttle
+            // Pressing Left during rewind increases shuttle speed
+            case Keys::PLAY_REVERSE:
                 if (ev.key.shift) {
-                    // Shift+Left = play in reverse direction
-                    if (!playing || !_engine.is_reversed) _start_reverse();
-                } else {
+                    // Shift+Left = rewind shuttle (toggle)
                     if (rewinding) _audio.stop();
                     else           { _stop_transport(); _toggle_rewind(); }
+                } else {
+                    // Left = play reverse or increase rewind speed
+                    if (ffing) {
+                        _stop_transport(); _start_reverse();
+                    } else if (rewinding) {
+                        _audio.shuttle_faster(true);  // increase rewind speed
+                    } else if (playing && !_engine.is_reversed) {
+                        _start_reverse();
+                    } else if (!playing) {
+                        _start_reverse();
+                    }
                 }
                 break;
 
-            // Right arrow — fast forward; Shift+Right — play forward
-            case sf::Keyboard::Right:
+            // Right arrow — play forward; Shift+Right — fast forward shuttle
+            // Pressing Right during FF increases shuttle speed
+            case Keys::PLAY_FORWARD:
                 if (ev.key.shift) {
-                    // Shift+Right = play forward (mirror of Shift+Left)
-                    if (!playing || _engine.is_reversed) _start_forward();
-                } else {
+                    // Shift+Right = fast forward shuttle (toggle)
                     if (ffing) _audio.stop();
                     else       { _stop_transport(); _toggle_ff(); }
+                } else {
+                    // Right = play forward or increase FF speed
+                    if (rewinding) {
+                        _stop_transport(); _start_forward();
+                    } else if (ffing) {
+                        _audio.shuttle_faster(false);  // increase FF speed
+                    } else if (playing && _engine.is_reversed) {
+                        _start_forward();
+                    } else if (!playing) {
+                        _start_forward();
+                    }
                 }
                 break;
 
-            // Up/Down arrows — intentionally unbound (reserved for UI scroll)
+            // Up arrow — play forward (alternative to Right)
+            case Keys::PLAY_FORWARD_ALT:
+                if (rewinding || ffing) { _stop_transport(); _start_forward(); }
+                else if (playing && _engine.is_reversed) _start_forward();
+                else if (!playing) _start_forward();
+                break;
 
             // O — open audio file
-            case sf::Keyboard::O:
+            case Keys::OPEN_AUDIO:
                 if (ev.key.control && !ev.key.shift) _open_load_audio();
                 break;
 
@@ -197,15 +226,15 @@ void CapstanApp::_process_events() {
             } // end if(!typing) switch
 
             // Ctrl+O always works regardless of text focus
-            if (ev.key.control && ev.key.code == sf::Keyboard::O && !ev.key.shift)
+            if (ev.key.control && ev.key.code == Keys::OPEN_AUDIO && !ev.key.shift)
                 _open_load_audio();
             // Ctrl+S = save project; Ctrl+Shift+S = save as
-            if (ev.key.control && ev.key.code == sf::Keyboard::S) {
+            if (ev.key.control && ev.key.code == Keys::SAVE_PROJECT) {
                 if (ev.key.shift || _project_path.empty()) _open_save_project();
                 else _save_project(_project_path);
             }
             // Ctrl+Shift+O = open project
-            if (ev.key.control && ev.key.shift && ev.key.code == sf::Keyboard::O)
+            if (ev.key.control && ev.key.shift && ev.key.code == Keys::OPEN_PROJECT)
                 _open_load_project();
         }
     }
@@ -242,15 +271,35 @@ void CapstanApp::_draw_file_dialogs() {
                 if (!fs::is_regular_file(path, _ec)) {
                     CV_ERR(FILE_NOT_FOUND, path);
                 } else {
+                    // Check if user is trying to open a project file as audio
+                    if (path.size() >= 10 && path.substr(path.size() - 10) == ".cvproject") {
+                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a project file. Use File → Open Project (" + std::string(Keys::UI::OPEN_PROJECT) + ") instead.");
+                        _fd_pending = FDPending::None;
+                        return;
+                    }
+                    // Check if user is trying to open a preset file as audio
+                    if ((path.size() >= 5 && path.substr(path.size() - 5) == ".cvpr") ||
+                        (path.size() >= 5 && path.substr(path.size() - 5) == ".json")) {
+                        CV_ERR(FILE_OPEN_FAILED, path + ": This is a preset file. Use File → Import Preset instead.");
+                        _fd_pending = FDPending::None;
+                        return;
+                    }
+                    
                     _audio.stop();
                     _loaded_file = path;
+                    // Apply current perf settings to stream buffer BEFORE opening
+                    // (StreamBuffer::open() uses these values to allocate the ring buffer)
+                    _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
+                    _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
+                    _engine.stream.io_chunk_frames = _perf.io_chunk_frames;
+                    std::fprintf(stderr, "[UI] Applying perf options: ring=%ds (%d frames), ahead=%ds (%d frames), chunk=%d frames\n",
+                        _perf.ring_seconds, _engine.stream.ring_frames,
+                        _perf.ahead_seconds, _engine.stream.ahead_frames,
+                        _perf.io_chunk_frames);
                     if (!_engine.load_file(path)) {
                         CV_ERR(FILE_OPEN_FAILED, path);
                         _loaded_file.clear();
                     } else {
-                        // Apply current perf settings to stream buffer
-                        _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
-                        _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
                         _reel.reset();
                         _project_dirty = true;
                         _update_window_title();
@@ -419,6 +468,7 @@ void CapstanApp::_draw_frame() {
     _draw_timeline();
     _draw_error_log();
     if (_show_options) _draw_options();
+    _draw_notifications();  // Inline notifications below header
     ErrorLog::get().clear_new_flag();
 }
 
@@ -491,37 +541,53 @@ void CapstanApp::_draw_header() {
     ImGui::EndChild();
     ImGui::SameLine();
 
-    // ── Centre: title + reel animation ────────────────────────────────────────
+    // ── Centre: title + reel animation + VU meters ────────────────────────────
     float side_w  = 260.f + 10.f + 200.f + 10.f;
     float mid_w   = std::max(120.f, total_w - side_w);
     ImGui::BeginChild("##hdr_mid", {mid_w, HEADER_H}, false);
     {
-        // Reel visualisation using draw list
+        // ── Left VU Meter ─────────────────────────────────────────────────────
+        float meter_radius = HEADER_H * 0.42f;
+        float level_l = _audio.get_level_left();
         ImVec2 c0 = ImGui::GetCursorScreenPos();
+        ImVec2 vu_l_center = {c0.x + meter_radius + 8.f, c0.y + meter_radius + 4.f};
+        _draw_vu_meter(vu_l_center, meter_radius, level_l, "L");
+        ImGui::SetCursorScreenPos({c0.x + meter_radius * 2.f + 16.f, c0.y});
+
+        // Reel visualisation using draw list
+        ImVec2 reel_pos = ImGui::GetCursorScreenPos();
         // Reel animation — ground truth is play_head delta per frame.
         // Captures inertia, speed, direction, wow, flutter, all effects.
+        // Update reel rotation speed based on current IPS setting
+        _reel.set_ips(_display_params.ips_base);
         _reel.draw(
             _engine.play_head,
             _engine.total_samples,
             _engine.is_reversed,
             std::abs(_audio.signed_tape_speed()) > 0.002f,
             _audio.signed_tape_speed(),
-            c0,
-            {mid_w, HEADER_H}
+            reel_pos,
+            {mid_w - (meter_radius * 2.f + 16.f) * 2.f, HEADER_H}
         );
 
+        // ── Right VU Meter ────────────────────────────────────────────────────
+        float level_r = _audio.get_level_right();
+        float right_vu_x = reel_pos.x + mid_w - (meter_radius * 2.f + 16.f) - meter_radius - 8.f;
+        ImVec2 vu_r_center = {right_vu_x, vu_l_center.y};
+        _draw_vu_meter(vu_r_center, meter_radius, level_r, "R");
+
         // Title (centred between reels)
-        ImGui::SetCursorScreenPos({c0.x, c0.y+2});
+        ImGui::SetCursorScreenPos({reel_pos.x, reel_pos.y+2});
         ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
         ImGui::SetWindowFontScale(1.3f);
         float tw = ImGui::CalcTextSize("CAPSTANVAR").x;
-        ImGui::SetCursorPosX((mid_w-tw)*0.5f);
+        ImGui::SetCursorPosX((mid_w - tw) * 0.5f);
         ImGui::Text("CAPSTANVAR");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, Col::grey);
         float sw = ImGui::CalcTextSize("ANALOG TAPE SIMULATOR").x;
-        ImGui::SetCursorPosX((mid_w-sw)*0.5f);
+        ImGui::SetCursorPosX((mid_w - sw) * 0.5f);
         ImGui::Text("ANALOG TAPE SIMULATOR");
         ImGui::PopStyleColor();
     }
@@ -581,7 +647,7 @@ void CapstanApp::_draw_header() {
 
 // ── Preset bar ────────────────────────────────────────────────────────────────
 void CapstanApp::_draw_preset_bar() {
-    // Project buttons
+    // Left side: Project buttons
     {
         bool dirty = _project_dirty;
         std::string proj_label = "NEW";
@@ -592,16 +658,19 @@ void CapstanApp::_draw_preset_bar() {
         }
         if (_col_button(proj_label.c_str(), dirty?Col::orange_dim:Col::bg3,
                          dirty?Col::orange:Col::grey_lt, 130)) {
-            // Like Ctrl+S: save in-place if path known, else Save As
             if (_project_path.empty()) _open_save_project();
             else _save_project(_project_path);
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Save project  (Ctrl+S)\nRight-click: Save As");
+            ImGui::SetTooltip(("Save project  (" + std::string(Keys::UI::SAVE_PROJECT) + ")\nRight-click: Save As").c_str());
+        // Right-click for Save As
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            _open_save_project();
+        }
     }
     ImGui::SameLine();
     if (_col_button("Open Project", Col::bg3, Col::cyan, 115)) _open_load_project();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open project  (Ctrl+Shift+O)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(("Open project  (" + std::string(Keys::UI::OPEN_PROJECT) + ")").c_str());
     ImGui::SameLine(0, 4);
     if (_col_button("New", Col::bg3, Col::grey_lt, 44)) {
         if (_project_dirty) _show_new_confirm = true;
@@ -610,8 +679,18 @@ void CapstanApp::_draw_preset_bar() {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("New project  (clears all state)");
     ImGui::SameLine(0, 12);
     if (_col_button("LOAD", Col::green_dim, Col::green, 50)) _open_load_audio();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(("Load audio file  (" + std::string(Keys::UI::OPEN_AUDIO) + ")").c_str());
     ImGui::SameLine();
-
+    
+    // Centre spacer - push preset controls to right side
+    float win_w = ImGui::GetWindowWidth();
+    float left_w = 130.f + 115.f + 44.f + 12.f + 50.f + 30.f;  // project buttons + LOAD + spacing
+    float right_w = 50.f + 240.f + 45.f + 80.f + 50.f + 70.f + 70.f + 72.f;  // PRESET+dropdown+OXIDE+dropdown+buttons
+    float spacer = win_w - left_w - right_w - 20.f;
+    if (spacer > 10.f) ImGui::Dummy({spacer, 1});
+    ImGui::SameLine();
+    
+    // Right side: Preset selector and controls
     auto& builtins = _presets.builtin_presets();
     auto& sessions = _presets.session_presets();
     ImGui::Text("PRESET:"); ImGui::SameLine();
@@ -689,6 +768,14 @@ void CapstanApp::_draw_transport_tab() {
 }
 void CapstanApp::_draw_magnetic_tab() {
     ImGui::BeginChild("##ms",{0,0},false); bool c=false;
+    
+    // ── Input ──────────────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::green);
+    ImGui::TextUnformatted("INPUT"); ImGui::PopStyleColor();
+    ImGui::Separator();
+    c|=_aslider("ingain","INPUT VOLUME",               _ui_params.input_gain,     0.f,  2.f,   Col::green,"Input gain/trim. Reduce for hot sources to prevent clipping.");
+    ImGui::Spacing();
+    
     c|=_aslider("drv",  "HEAD SATURATION",             _ui_params.drive,          1.f,  20.f,  Col::cyan,"Drive into coating. Higher = warmth then clip.");
     c|=_aslider("bias", "AC BIAS TUNING",              _ui_params.bias,           0.5f, 3.f,   Col::cyan,"Under=bright/distorted. Over=dark/clean.");
     c|=_aslider("rd",   "REPLAY DIFFERENTIATION",      _ui_params.replay_diff,    0.f,  1.f,   Col::cyan,"Head reads flux rate-of-change (+6dB/oct HF).");
@@ -733,17 +820,14 @@ void CapstanApp::_draw_transport_controls() {
     // ── Row 1: main transport ─────────────────────────────────────────────────
     // REWIND  |  PLAY  |  STOP  |  REVERSE  |  FF  |  [render progress]
     {
-        static const float rwd_speeds[]={40.f,80.f,160.f};
-        static int rwd_tier=0, ff_tier=0;
-
         // REWIND
         if (rewinding) {
-            char lb[24]; std::snprintf(lb,sizeof(lb),"<< %.0fX",rwd_speeds[rwd_tier]);
+            float speed = _audio.shuttle_speed();
+            char lb[24]; std::snprintf(lb,sizeof(lb),"<< %.0fX", speed);
             ImVec4 flash = (std::fmod(ImGui::GetTime()*3.f,1.f)>.5f) ? Col::cyan : Col::cyan_dim;
             if (_transport_btn(lb, Col::cyan_dim, flash, SH_W, BTN_H))
-                { rwd_tier=(rwd_tier+1)%3; _audio.cycle_shuttle_speed(); }
+                _audio.stop();
         } else {
-            rwd_tier=0;
             if (_transport_btn("<<\nREWIND", Col::bg4, Col::cyan, SH_W, BTN_H))
                 { _stop_transport(); _toggle_rewind(); }
         }
@@ -780,12 +864,12 @@ void CapstanApp::_draw_transport_controls() {
 
         // FF
         if (ffing) {
-            char lb[24]; std::snprintf(lb,sizeof(lb),">> %.0fX",rwd_speeds[ff_tier]);
+            float speed = _audio.shuttle_speed();
+            char lb[24]; std::snprintf(lb,sizeof(lb),">> %.0fX", speed);
             ImVec4 flash = (std::fmod(ImGui::GetTime()*3.f,1.f)>.5f) ? Col::green : Col::green_dim;
             if (_transport_btn(lb, Col::green_dim, flash, SH_W, BTN_H))
-                { ff_tier=(ff_tier+1)%3; _audio.cycle_shuttle_speed(); }
+                _audio.stop();
         } else {
-            ff_tier=0;
             if (_transport_btn(">>\nFF", Col::bg4, Col::green, SH_W, BTN_H))
                 { _stop_transport(); _toggle_ff(); }
         }
@@ -876,14 +960,15 @@ void CapstanApp::_draw_transport_controls() {
 
         struct KV { const char* key; const char* desc; };
         static const KV shortcuts[] = {
-            {"Space",     "play/stop"},
-            {"S",         "stop"},
-            {"R",         "reverse"},
-            {"< / >",     "rwd/ff"},
-            {"Ctrl+O",    "load"},
-            {"Ctrl+S",    "save"},
-            {"Ctrl+Sh+S", "save as"},
-            {"Ctrl+Sh+O", "open proj"},
+            {Keys::UI::PLAY_TOGGLE,     "play/stop"},
+            {Keys::UI::STOP,            "stop"},
+            {Keys::UI::PLAY_REV_ALT,    "reverse"},
+            {Keys::UI::SHUTTLE_REV,     "rwd"},
+            {Keys::UI::SHUTTLE_FWD,     "ff"},
+            {Keys::UI::OPEN_AUDIO,      "load"},
+            {Keys::UI::SAVE_PROJECT,    "save"},
+            {Keys::UI::SAVE_PROJECT_AS, "save as"},
+            {Keys::UI::OPEN_PROJECT,    "open proj"},
         };
 
         float x = wpos.x + 8.f, y = cy + 2.f;
@@ -965,6 +1050,129 @@ bool CapstanApp::_transport_btn(const char* label, const ImVec4& bg,
     }
 
     return pressed;
+}
+
+// ── 180° Squared VU Meter ─────────────────────────────────────────────────────
+// Draws a semicircular VU meter with squared edges
+// Parameters:
+//   center: center point of the semicircle (bottom-center of the arc)
+//   radius: outer radius of the meter
+//   level: audio level 0.0-1.0 (linear, not dB)
+//   label: channel label ("L" or "R")
+void CapstanApp::_draw_vu_meter(const ImVec2& center, float radius, float level, const char* label) {
+    auto* dl = ImGui::GetWindowDrawList();
+
+    // Clamp level and convert to angle (0 to PI for 180 degrees)
+    float clamped = std::clamp(level, 0.f, 1.f);
+    // Apply logarithmic scaling for more realistic VU response (-60dB to 0dB)
+    float log_level = (clamped > 0.001f) ? (1.f + std::log10(clamped) / 3.f) : 0.f;
+    log_level = std::clamp(log_level, 0.f, 1.f);
+    // float angle = log_level * PI;  // 0 to 180 degrees in radians (unused, kept for reference)
+
+    // Scale thickness proportionally to radius (thicker for larger meters)
+    const float thickness = radius * 0.22f;
+    const float inner_r = radius - thickness;
+
+    // Background arc (full 180 degrees) - dark
+    const int segments = 32;
+    const float start_angle = PI;  // Start from left (180 degrees)
+
+    // Draw background arc (squared/rectangular style)
+    for (int i = 0; i < segments; ++i) {
+        float a0 = start_angle - (float)i * PI / segments;
+        float a1 = start_angle - (float)(i + 1) * PI / segments;
+
+        // Outer points
+        ImVec2 o0(center.x + std::cos(a0) * radius, center.y - std::sin(a0) * radius);
+        ImVec2 o1(center.x + std::cos(a1) * radius, center.y - std::sin(a1) * radius);
+        // Inner points
+        ImVec2 i0(center.x + std::cos(a0) * inner_r, center.y - std::sin(a0) * inner_r);
+        ImVec2 i1(center.x + std::cos(a1) * inner_r, center.y - std::sin(a1) * inner_r);
+
+        dl->AddQuad(o0, o1, i1, i0, IM_COL32(40, 40, 50, 200));
+    }
+
+    // Draw filled portion (active level) with color gradient
+    int filled_segments = (int)(segments * log_level);
+    if (filled_segments > 0) {
+        for (int i = 0; i < filled_segments; ++i) {
+            float a0 = start_angle - (float)i * PI / segments;
+            float a1 = start_angle - (float)(i + 1) * PI / segments;
+
+            ImVec2 o0(center.x + std::cos(a0) * radius, center.y - std::sin(a0) * radius);
+            ImVec2 o1(center.x + std::cos(a1) * radius, center.y - std::sin(a1) * radius);
+            ImVec2 i0(center.x + std::cos(a0) * inner_r, center.y - std::sin(a0) * inner_r);
+            ImVec2 i1(center.x + std::cos(a1) * inner_r, center.y - std::sin(a1) * inner_r);
+
+            // Color gradient: green -> yellow -> red
+            float t = (float)i / segments;
+            ImU32 col;
+            if (t < 0.5f) {
+                // Green to yellow
+                float s = t * 2.f;
+                col = IM_COL32((int)(100 + 155 * s), 255, 50, 255);
+            } else if (t < 0.75f) {
+                // Yellow to orange
+                float s = (t - 0.5f) * 4.f;
+                col = IM_COL32(255, (int)(255 - 100 * s), 50, 255);
+            } else {
+                // Orange to red
+                float s = (t - 0.75f) * 4.f;
+                col = IM_COL32(255, (int)(155 - 105 * s), 50, 255);
+            }
+
+            dl->AddQuadFilled(o0, o1, i1, i0, col);
+        }
+    }
+
+    // Draw needle/hand pointer (gauge style - triangle shaped)
+    float needle_angle = start_angle - log_level * PI;  // Point to current level
+    float needle_len = radius * 0.85f;
+    float needle_x = std::cos(needle_angle) * needle_len;
+    float needle_y = -std::sin(needle_angle) * needle_len;
+    ImVec2 needle_tip(center.x + needle_x, center.y + needle_y);
+    
+    // Calculate perpendicular direction for triangle width
+    float perp_angle = needle_angle - PI / 2.f;
+    float tri_half_width = radius * 0.08f;  // Triangle width at base
+    float perp_x = std::cos(perp_angle) * tri_half_width;
+    float perp_y = -std::sin(perp_angle) * tri_half_width;
+    
+    // Triangle base points (at center pivot edge)
+    float base_dist = inner_r * 0.35f;
+    float base_x = std::cos(needle_angle) * base_dist;
+    float base_y = -std::sin(needle_angle) * base_dist;
+    ImVec2 base_center(center.x + base_x, center.y + base_y);
+    ImVec2 base_left(base_center.x + perp_x, base_center.y + perp_y);
+    ImVec2 base_right(base_center.x - perp_x, base_center.y - perp_y);
+    
+    // Needle shadow (slightly offset triangle)
+    dl->AddTriangleFilled(
+        {needle_tip.x + 1.5f, needle_tip.y + 1.5f},
+        {base_left.x + 1.5f, base_left.y + 1.5f},
+        {base_right.x + 1.5f, base_right.y + 1.5f},
+        IM_COL32(0, 0, 0, 80));
+    
+    // Needle triangle (red with gradient effect via outline)
+    dl->AddTriangleFilled(needle_tip, base_left, base_right, IM_COL32(255, 90, 90, 255));
+    dl->AddTriangle(needle_tip, base_left, base_right, IM_COL32(200, 40, 40, 255), 1.5f);
+    
+    // Needle tip circle (smaller, integrated with triangle)
+    dl->AddCircleFilled(needle_tip, 2.5f, IM_COL32(255, 120, 120, 255));
+
+    // Draw center pivot circle (scaled proportionally) - on top of needle base
+    dl->AddCircleFilled(center, inner_r * 0.55f, IM_COL32(60, 60, 70, 255));
+    dl->AddCircle(center, inner_r * 0.55f, IM_COL32(100, 100, 120, 255), 0, 3.f);
+    
+    // Center pivot highlight
+    dl->AddCircleFilled(center, inner_r * 0.25f, IM_COL32(80, 80, 95, 255));
+
+    // Draw channel label (larger font for bigger meters)
+    ImFont* font = ImGui::GetFont();
+    float fs = radius * 0.5f;  // Scale font with meter size
+    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, label);
+    dl->AddText(font, fs, {center.x - ts.x * 0.5f, center.y - ts.y * 0.5f},
+                IM_COL32(220, 220, 230, 255), label);
 }
 
 // ── Render dialog ─────────────────────────────────────────────────────────────
@@ -1433,6 +1641,33 @@ void CapstanApp::_draw_options() {
 
     ImGui::Spacing();
 
+    // ── VU Meter ──────────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::green);
+    ImGui::TextUnformatted("VU METER"); ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    ImGui::Text("Response speed:");
+    ImGui::SameLine();
+    const char* vu_names[] = {"Slow (Classic VU)", "Medium (Default)", "Fast (PPM)"};
+    const char* vu_tips[]  = {
+        "300ms attack, 1.5s decay - traditional analog VU meter behavior",
+        "100ms attack, 500ms decay - balanced response for most material",
+        "50ms attack, 200ms decay - fast PPM-style metering, shows transients"
+    };
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::BeginCombo("##vuresp", vu_names[_perf.vu_response])) {
+        for (int i = 0; i < 3; ++i)
+            if (ImGui::Selectable(vu_names[i], _perf.vu_response == i)) {
+                _perf.vu_response = i;
+                _audio.set_vu_response(i);
+                _perf.save();
+            }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", vu_tips[_perf.vu_response]);
+
+    ImGui::Spacing();
+
     if (changed) _perf.save();
 
     ImGui::Separator();
@@ -1505,6 +1740,88 @@ void CapstanApp::_draw_error_log() {
     ImGui::EndChild();
     ImGui::End();
 }
+
+// ── Inline notifications (below header) ───────────────────────────────────────
+void CapstanApp::_draw_notifications() {
+    auto entries = ErrorLog::get().snapshot();
+    
+    // Find first undismissed entry
+    for (auto& e : entries) {
+        if (e.dismissed) continue;
+        
+        // Show notifications bar
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        float pad = 8.f;
+        float height = 0.f;
+        
+        // Calculate total height needed
+        for (auto& entry : entries) {
+            if (!entry.dismissed) height += 28.f;
+        }
+        if (height == 0.f) return;  // No undismissed entries
+        
+        height += pad * 2.f;
+        
+        ImGui::SetNextWindowPos({vp->Pos.x, vp->Pos.y + HEADER_H});
+        ImGui::SetNextWindowSize({vp->Size.x, height});
+        ImGui::SetNextWindowBgAlpha(0.95f);
+        
+        if (!ImGui::Begin("##notifications", nullptr,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+            ImGui::End(); return;
+        }
+        
+        ImGui::SetCursorPosY(pad);
+        
+        for (auto& entry : entries) {
+            if (entry.dismissed) continue;
+            
+            // Severity colors and icons
+            ImU32 icon_col, text_col, bg_col;
+            const char* icon = err_severity_icon(entry.severity);
+            
+            switch (entry.severity) {
+            case ErrSeverity::Info:
+                icon_col = IM_COL32(100,180,255,255);
+                text_col = IM_COL32(200,220,255,255);
+                bg_col   = IM_COL32(30,50,80,200);
+                break;
+            case ErrSeverity::Warning:
+                icon_col = IM_COL32(255,200,50,255);
+                text_col = IM_COL32(255,230,150,255);
+                bg_col   = IM_COL32(80,60,20,200);
+                break;
+            case ErrSeverity::Error:
+                icon_col = IM_COL32(255,80,80,255);
+                text_col = IM_COL32(255,180,180,255);
+                bg_col   = IM_COL32(80,20,20,200);
+                break;
+            }
+            
+            // Background
+            ImVec2 p_min = ImGui::GetCursorScreenPos();
+            ImVec2 p_max = {vp->Pos.x + vp->Size.x - pad*2, p_min.y + 24.f};
+            ImGui::GetWindowDrawList()->AddRectFilled(p_min, p_max, bg_col, 4.f);
+            
+            // Icon
+            ImVec2 icon_pos = {p_min.x + 10.f, p_min.y + 4.f};
+            ImGui::GetWindowDrawList()->AddText(nullptr, 18.f, icon_pos, icon_col, icon);
+            
+            // Message
+            char msg[512];
+            std::snprintf(msg, sizeof(msg), "%s  %s", err_code_str(entry.code),
+                         entry.message.empty() ? "" : entry.message.c_str());
+            ImVec2 text_pos = {p_min.x + 32.f, p_min.y + 5.f};
+            ImGui::GetWindowDrawList()->AddText(nullptr, 15.f, text_pos, text_col, msg);
+            
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 28.f);
+        }
+        
+        ImGui::End();
+        return;  // Only show one notification bar
+    }
+}
 void CapstanApp::_draw_timeline() {
     // Keep anim cursor in sync with playback
     if (_engine.is_playing.load())
@@ -1548,6 +1865,7 @@ void CapstanApp::_sync_params() {
     // Copy only user-controllable DSP fields — never touch transport internals.
     std::lock_guard<std::mutex> g(_engine.lock);
     EngineParams& ep = _engine.params;
+    ep.input_gain=_ui_params.input_gain;
     ep.ips_base=_ui_params.ips_base; ep.motor_health=_ui_params.motor_health;
     ep.motor_drag=_ui_params.motor_drag; ep.motor_boost=_ui_params.motor_boost;
     ep.wow_dep=_ui_params.wow_dep; ep.flutter_dep=_ui_params.flutter_dep;
@@ -1648,6 +1966,10 @@ void CapstanApp::_load_project(const std::string& path) {
         if (fs::is_regular_file(d->audio_path_abs, ec)) {
             _audio.stop();
             _loaded_file = d->audio_path_abs;
+            // Apply current perf settings to stream buffer BEFORE opening
+            _engine.stream.ring_frames   = _perf.ring_seconds  * 44100;
+            _engine.stream.ahead_frames  = _perf.ahead_seconds * 44100;
+            _engine.stream.io_chunk_frames = _perf.io_chunk_frames;
             _engine.load_file(_loaded_file);
             _reel.reset();
             // Seek to saved position
@@ -1813,23 +2135,32 @@ void CapstanApp::_draw_close_confirm() {
 }
 
 void CapstanApp::_start_forward() {
-    if (_engine.audio_data.empty()) return;
+    // Check if audio is loaded (either via audio_data or StreamBuffer)
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     _audio.play_forward();
 }
 void CapstanApp::_start_reverse() {
-    if (_engine.audio_data.empty()) return;
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
     _audio.play_reverse();
 }
 void CapstanApp::_stop_transport() {
     _audio.stop();
 }
 void CapstanApp::_toggle_rewind() {
-    if (_engine.audio_data.empty()) return;
-    if (_audio.is_rewinding()) { _audio.stop(); return; }
-    _audio.shuttle_rewind(40.f);
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
+    // Only stop if already shuttling at significant speed (> 5x)
+    if (_audio.is_rewinding() && std::abs(_audio.shuttle_speed()) > 5.f) { 
+        _audio.stop(); 
+        return; 
+    }
+    _audio.shuttle_rewind(10.f);  // Start at 10x
 }
 void CapstanApp::_toggle_ff() {
-    if (_engine.audio_data.empty()) return;
-    if (_audio.is_ffing()) { _audio.stop(); return; }
-    _audio.shuttle_ff(40.f);
+    if (_engine.audio_data.empty() && !_engine.stream.is_open()) return;
+    // Only stop if already shuttling at significant speed (> 5x)
+    if (_audio.is_ffing() && std::abs(_audio.shuttle_speed()) > 5.f) { 
+        _audio.stop(); 
+        return; 
+    }
+    _audio.shuttle_ff(10.f);  // Start at 10x
 }

@@ -47,6 +47,9 @@ static constexpr float HC_REF = 250.0f; // Fe2O3 reference coercivity
 
 // ── Engine parameters (all controls in one flat struct) ───────────────────────
 struct EngineParams {
+    // Input
+    float input_gain     = 1.0f;    // Input volume/trim (0 to 2.0, 1.0 = unity)
+    
     // Transport
     float ips_base       = 15.0f;
     float motor_health   = 0.0f;
