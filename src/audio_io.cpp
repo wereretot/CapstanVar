@@ -333,15 +333,13 @@ void AudioIO::_dsp_thread() {
                 _engine.set_reverse(want_rev, false);
         }
 
-        // ── Set engine transport parameters ────────────────────────────────
-        // tape_speed_mult: full signed speed magnitude — carries shuttle speed
-        //   and the smooth inertia ramp (0→1 during spinup, 0→40 for shuttle).
-        //   This is multiplied into the read stride in dsp_process.
+        // ── Set engine motor_engage flag ────────────────────────────────────────
         // motor_engage: kept at 1.0 while tape is moving — the inertia ramp
         //   is now entirely in _tape_speed, so motor_engage is just on/off.
+        // NOTE: tape_speed_mult is computed by the host application based on
+        //   ips_base and current_speed_mult — not written here to avoid races.
         {
             std::lock_guard<std::mutex> g(_engine.lock);
-            _engine.params.tape_speed_mult = std::abs(cur);
             _engine.params.motor_engage    = 1.0f;  // always on when moving
         }
 
