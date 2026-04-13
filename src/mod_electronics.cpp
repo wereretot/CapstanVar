@@ -208,4 +208,24 @@ void ElectronicComponents::process(Frame* buf, int n,
         _pink_state[0] = s0;
         _pink_state[1] = s1;
     }
+
+    // Characteristic 60Hz pulse-buzz seen when helical HiFi heads lose tracking.
+    // It's a sharp, metallic "tearing" sound synced to the field rate.
+    float hifi_amt = p.dropout_rate * 0.4f + p.tracking_error * 0.6f + p.motor_drag * 0.1f;
+    if (hifi_amt > 0.001f) {
+
+        float hifi_hz = 59.94f * speed_factor;
+        float hifi_inc = hifi_hz / SR_F;
+        for (int i = 0; i < n; ++i) {
+            _hifi_phase = std::fmod(_hifi_phase + hifi_inc, 1.0f);
+            // Pulse window (simulating head switching interference)
+            if (_hifi_phase < 0.035f) {
+                float pulse = std::sin(_hifi_phase * TWO_PI * 15.0f); // metallic harmonic
+                float crackle = el_normal(el_rng) * 0.4f;
+                float buzz = (pulse + crackle) * hifi_amt * 0.25f;
+                buf[i].l += buzz;
+                buf[i].r += buzz;
+            }
+        }
+    }
 }

@@ -40,4 +40,7 @@ private:
     float _rand_uniform();
     bool  _bm_ready = false;
     float _bm_spare = 0.0f;
+    
+    // HiFi buzz state
+    float _hifi_phase = 0.0f;
 };

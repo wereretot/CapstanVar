@@ -203,7 +203,13 @@ TransportResult TransportDynamics::process(int frames, float current_time,
         float speed = current_motor_speed + roller_wow + supply_wow + takeup_wow
                     + flutter + tension_mod;
 
-        result.speeds[i] = std::max(0.001f, speed * motor_engage);
+        float final_spd = std::max(0.001f, speed * motor_engage);
+        result.speeds[i] = final_spd;
+
+        // Populate history buffer for phase-accurate video sync
+        // Indexed by the absolute sample position in the source file
+        int64_t idx = p.is_reversed ? int64_t(play_head - i) : int64_t(play_head + i);
+        speed_history[uint64_t(idx) % SPEED_HIST_SIZE] = final_spd;
     }
 
     last_instant_speed = result.speeds.back();

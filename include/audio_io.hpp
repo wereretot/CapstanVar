@@ -53,6 +53,7 @@ public:
     // ── VU Metering — peak levels with decay ─────────────────────────────────
     float get_level_left()  const { return _level_left.load(); }
     float get_level_right() const { return _level_right.load(); }
+    int64_t get_hardware_delay() const { return _hardware_delay.load(); }
 
     // ── VU Meter response speed — 0=slow, 1=medium, 2=fast ───────────────────
     void set_vu_response(int response) { _vu_response.store(response); }
@@ -64,6 +65,7 @@ private:
     // ── VU Meter state — written by DSP thread, read by UI ───────────────────
     std::atomic<float> _level_left{0.f};
     std::atomic<float> _level_right{0.f};
+    std::atomic<int64_t> _hardware_delay{0};
     float _level_peak_l = 0.f;  // DSP thread only
     float _level_peak_r = 0.f;
     int   _level_decay_cnt = 0;

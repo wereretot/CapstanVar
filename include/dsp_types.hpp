@@ -64,6 +64,7 @@ struct EngineParams {
     float scrape_flutter = 0.1f;
     float tension_load   = 0.01f;
     float dropout_rate   = 0.0f;
+    float tracking_error = 0.0f; // Linked to VCR head alignment
 
     // Magnetic
     float drive          = 1.2f;

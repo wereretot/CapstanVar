@@ -437,9 +437,15 @@ void AudioIO::_dsp_thread() {
 
         _write_block(interleaved.data(), BLOCK_SIZE);
         
-        // ── Recording hook for export ────────────────────────────────────────
         if (_capture_cb) {
             _capture_cb(interleaved);
+        }
+
+        // Update real-time hardware latency for A/V sync 
+        auto* b = static_cast<PaBackend*>(_backend);
+        if (b && b->stream) {
+            const PaStreamInfo* info = Pa_GetStreamInfo(b->stream);
+            if (info) _hardware_delay.store(int64_t(info->outputLatency * SR));
         }
     }
 
