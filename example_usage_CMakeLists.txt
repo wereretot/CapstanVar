@@ -1,0 +1,47 @@
+# Example CMakeLists.txt showing how to use CapstanVar as a library
+#
+# This file demonstrates how an external project can integrate
+# the CapstanVar tape warping DSP engine.
+
+cmake_minimum_required(VERSION 3.20)
+project(MyAudioApp VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ── Option 1: Include CapstanVar as a subdirectory ────────────────────────────
+# Place the CapstanVar source tree alongside your project, then:
+add_subdirectory(CapstanVar)
+
+# Build ONLY the library (don't build the CapstanVar app)
+# This must be set BEFORE adding the subdirectory
+set(CAPSTANVAR_BUILD_EXECUTABLE OFF CACHE BOOL "" FORCE)
+set(CAPSTANVAR_BUILD_LIBRARY ON CACHE BOOL "" FORCE)
+
+add_executable(MyAudioApp main.cpp)
+target_link_libraries(MyAudioApp PRIVATE CapstanVar::CapstanVarLib)
+
+# ── Option 2: Use an installed CapstanVar library ─────────────────────────────
+# If you've already built and installed CapstanVar:
+#   cmake --install build --prefix /usr/local
+#
+# Then in your project:
+#
+# find_package(CapstanVar REQUIRED)
+# target_link_libraries(MyAudioApp PRIVATE CapstanVar::CapstanVarLib)
+
+# ── Option 3: Use FetchContent to download and build automatically ─────────────
+# include(FetchContent)
+#
+# FetchContent_Declare(CapstanVar
+#     GIT_REPOSITORY https://github.com/your-org/CapstanVar.git
+#     GIT_TAG        main
+# )
+#
+# # Configure to build only the library
+# set(CAPSTANVAR_BUILD_EXECUTABLE OFF CACHE BOOL "" FORCE)
+# set(CAPSTANVAR_BUILD_LIBRARY ON CACHE BOOL "" FORCE)
+#
+# FetchContent_MakeAvailable(CapstanVar)
+#
+# target_link_libraries(MyAudioApp PRIVATE CapstanVar::CapstanVarLib)

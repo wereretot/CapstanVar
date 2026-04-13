@@ -212,6 +212,9 @@ void AudioIO::shuttle_faster(bool reverse) {
 }
 void AudioIO::stop_shuttle() { stop(); }
 
+// Old capture logic removed - using set_capture_callback for better sync
+
+
 void AudioIO::cycle_shuttle_speed() {
     float cur = std::abs(_target_speed.load());
     const float tiers[] = {40.f, 80.f, 160.f};
@@ -433,6 +436,11 @@ void AudioIO::_dsp_thread() {
         _level_right.store(_level_peak_r);
 
         _write_block(interleaved.data(), BLOCK_SIZE);
+        
+        // ── Recording hook for export ────────────────────────────────────────
+        if (_capture_cb) {
+            _capture_cb(interleaved);
+        }
     }
 
     _engine.is_playing.store(false);

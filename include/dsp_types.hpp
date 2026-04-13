@@ -14,11 +14,15 @@ static constexpr float PI          = 3.14159265358979323846f;
 static constexpr float TWO_PI      = 2.0f * PI;
 static constexpr int   BLOCK_SIZE  = 1024;
 static constexpr int   MAX_CHANNELS = 2;
+using std::lerp;
 
 // ── Stereo sample ─────────────────────────────────────────────────────────────
 struct Frame {
     float l = 0.0f;
     float r = 0.0f;
+
+    Frame() = default;
+    Frame(float _l, float _r) : l(_l), r(_r) {}
 
     Frame  operator+(const Frame& o) const { return {l+o.l, r+o.r}; }
     Frame  operator*(float s)        const { return {l*s,   r*s  }; }
@@ -196,5 +200,5 @@ inline float fast_tanh(float x) {
     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
 }
 
-inline float lerp(float a, float b, float t) { return a + (b-a)*t; }
+inline float cv_lerp(float a, float b, float t) { return a + (b-a)*t; }
 inline float clamp01(float x) { return x < 0.f ? 0.f : x > 1.f ? 1.f : x; }

@@ -2,6 +2,8 @@
 #include "engine.hpp"
 #include <atomic>
 #include <thread>
+#include <vector>
+#include <functional>
 
 // ── Transport state machine ───────────────────────────────────────────────────
 // A single signed _tape_speed value drives everything:
@@ -31,6 +33,12 @@ public:
     void shuttle_faster(bool reverse);  // increase shuttle speed
     void stop_shuttle();
     void cycle_shuttle_speed();
+    
+    // ── Audio Capture for Export ─────────────────────────────────────────────
+    // Passes processed stereo interleaved samples to a callback for sync
+    void set_capture_callback(std::function<void(const std::vector<float>&)> cb) {
+        _capture_cb = cb;
+    }
     
     float shuttle_speed() const { return std::abs(_target_speed.load()); }  // current shuttle speed
 
@@ -75,6 +83,8 @@ private:
     // For reel animation — written by DSP thread
     std::atomic<float> _current_speed_mult{0.f};
     std::atomic<float> _signed_tape_speed  {0.f};  // signed: + = fwd, - = rev
+    
+    std::function<void(const std::vector<float>&)> _capture_cb;
 
     void* _backend = nullptr;
     bool  _open_device();

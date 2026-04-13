@@ -13,6 +13,14 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# ── Build options ─────────────────────────────────────────────────────────────
+option(CAPSTANVAR_BUILD_EXECUTABLE "Build the standalone application" ON)
+option(CAPSTANVAR_BUILD_LIBRARY    "Build as a reusable library" OFF)
+
+if(NOT CAPSTANVAR_BUILD_EXECUTABLE AND NOT CAPSTANVAR_BUILD_LIBRARY)
+    message(FATAL_ERROR "At least one of CAPSTANVAR_BUILD_EXECUTABLE or CAPSTANVAR_BUILD_LIBRARY must be enabled")
+endif()
+
 # ── Compiler flags ────────────────────────────────────────────────────────────
 if(MSVC)
     add_compile_options(/O2 /W4 /MP /arch:AVX2)
@@ -111,59 +119,105 @@ elseif(WIN32)
     set(AUDIO_DEFS   NAGRA_AUDIO_WINMM)
 endif()
 
-# ── Sources ───────────────────────────────────────────────────────────────────
-set(IMGUI_SOURCES
-    ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_draw.cpp
-    ${imgui_SOURCE_DIR}/imgui_tables.cpp
-    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+# ── Include directories (shared) ──────────────────────────────────────────────
+set(CAPSTANVAR_INCLUDE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${imgui_SOURCE_DIR}
+    ${imgui_sfml_SOURCE_DIR}
 )
 
-set(APP_SOURCES
-    src/main.cpp
+# ── Core library sources (DSP engine + audio I/O) ────────────────────────────
+set(LIB_SOURCES
     src/engine.cpp
     src/mod_transport.cpp
     src/mod_magnetic.cpp
     src/mod_electronics.cpp
     src/audio_io.cpp
     src/preset_manager.cpp
-    src/ui.cpp
-    src/ui_panels.cpp
-    src/render_engine.cpp
 )
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tinyfiledialogs.c")
-    list(APPEND APP_SOURCES tinyfiledialogs.c)
-    add_compile_definitions(NAGRA_HAS_TFD)
-    message(STATUS "tinyfiledialogs found — native file dialogs enabled")
-else()
-    message(STATUS "tinyfiledialogs NOT found — file open/save will use stdin fallback")
+# ── Build the library ─────────────────────────────────────────────────────────
+if(CAPSTANVAR_BUILD_LIBRARY)
+    add_library(CapstanVarLib STATIC ${LIB_SOURCES})
+    add_library(CapstanVar::CapstanVarLib ALIAS CapstanVarLib)
+    
+    target_compile_definitions(CapstanVarLib PRIVATE ${AUDIO_DEFS})
+    target_include_directories(CapstanVarLib PUBLIC 
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${imgui_SOURCE_DIR}
+        ${imgui_sfml_SOURCE_DIR}
+    )
+    
+    # Link dependencies
+    target_link_libraries(CapstanVarLib PRIVATE
+        nlohmann_json::nlohmann_json
+        SndFile::sndfile
+        ${AUDIO_LIBS}
+        pthread
+    )
+    
+    # Set output name and properties
+    set_target_properties(CapstanVarLib PROPERTIES
+        OUTPUT_NAME CapstanVar
+        POSITION_INDEPENDENT_CODE ON
+    )
 endif()
 
-add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES})
+# ── Build the executable ──────────────────────────────────────────────────────
+if(CAPSTANVAR_BUILD_EXECUTABLE)
+    set(IMGUI_SOURCES
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    )
 
-target_compile_definitions(CapstanVar PRIVATE ${AUDIO_DEFS})
+    set(APP_SOURCES
+        src/main.cpp
+        src/ui.cpp
+        src/ui_panels.cpp
+        src/render_engine.cpp
+    )
 
-target_include_directories(CapstanVar PRIVATE
-    include/
-    ${imgui_SOURCE_DIR}
-    ${imgui_sfml_SOURCE_DIR}
-)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tinyfiledialogs.c")
+        list(APPEND APP_SOURCES tinyfiledialogs.c)
+        add_compile_definitions(NAGRA_HAS_TFD)
+        message(STATUS "tinyfiledialogs found — native file dialogs enabled")
+    else()
+        message(STATUS "tinyfiledialogs NOT found — file open/save will use stdin fallback")
+    endif()
 
-target_link_libraries(CapstanVar PRIVATE
-    ImGui-SFML::ImGui-SFML
-    sfml-graphics
-    sfml-window
-    sfml-system
-    nlohmann_json::nlohmann_json
-    SndFile::sndfile
-    ${AUDIO_LIBS}
-    pthread
-)
+    # If library is also built, link against it; otherwise compile everything together
+    if(CAPSTANVAR_BUILD_LIBRARY)
+        add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES})
+        target_link_libraries(CapstanVar PRIVATE
+            CapstanVarLib
+            ImGui-SFML::ImGui-SFML
+            sfml-graphics
+            sfml-window
+            sfml-system
+        )
+    else()
+        # Standalone build: compile all sources directly into executable
+        add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES} ${LIB_SOURCES})
+        target_compile_definitions(CapstanVar PRIVATE ${AUDIO_DEFS})
+        target_include_directories(CapstanVar PRIVATE ${CAPSTANVAR_INCLUDE_DIRS})
+        target_link_libraries(CapstanVar PRIVATE
+            ImGui-SFML::ImGui-SFML
+            sfml-graphics
+            sfml-window
+            sfml-system
+            nlohmann_json::nlohmann_json
+            SndFile::sndfile
+            ${AUDIO_LIBS}
+            pthread
+        )
+    endif()
 
-if(WIN32)
-    set_target_properties(CapstanVar PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(CapstanVar PRIVATE ole32 comdlg32)
+    if(WIN32)
+        set_target_properties(CapstanVar PROPERTIES WIN32_EXECUTABLE TRUE)
+        target_link_libraries(CapstanVar PRIVATE ole32 comdlg32)
+    endif()
+
+    install(TARGETS CapstanVar DESTINATION bin)
 endif()
-
-install(TARGETS CapstanVar DESTINATION bin)

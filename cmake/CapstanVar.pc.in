@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: CapstanVar
+Description: Analog tape warping DSP library for realtime audio processing
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lCapstanVar
+Cflags: -I${includedir}/CapstanVar
