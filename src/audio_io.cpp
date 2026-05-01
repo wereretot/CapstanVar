@@ -396,6 +396,11 @@ void AudioIO::_dsp_thread() {
             interleaved[i*2+1] = frame_buf[i].r;
         }
 
+        // ── Capture callback — send processed audio to UI ───────────────────────
+        if (_capture_callback) {
+            _capture_callback(interleaved);
+        }
+
         // ── VU Metering — compute peak levels with decay ─────────────────────
         float peak_l = 0.f, peak_r = 0.f;
         for (int i = 0; i < BLOCK_SIZE; ++i) {

@@ -2,8 +2,13 @@
 #include "engine.hpp"
 #include <atomic>
 #include <thread>
+<<<<<<< Updated upstream
 #include <vector>
 #include <functional>
+=======
+#include <functional>
+#include <vector>
+>>>>>>> Stashed changes
 
 // ── Transport state machine ───────────────────────────────────────────────────
 // A single signed _tape_speed value drives everything:
@@ -59,6 +64,9 @@ public:
     void set_vu_response(int response) { _vu_response.store(response); }
     int  get_vu_response() const { return _vu_response.load(); }
 
+    // ── Capture callback — receives processed interleaved audio ─────────────────
+    void set_capture_callback(std::function<void(const std::vector<float>&)> cb) { _capture_callback = cb; }
+
 private:
     TapeEngine& _engine;
 
@@ -70,6 +78,7 @@ private:
     float _level_peak_r = 0.f;
     int   _level_decay_cnt = 0;
     std::atomic<int> _vu_response{1};  // 0=slow, 1=medium, 2=fast
+    std::function<void(const std::vector<float>&)> _capture_callback;
 
     // The single signed target speed — UI thread writes, DSP thread reads.
     std::atomic<float> _target_speed{0.f};
