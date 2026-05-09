@@ -440,10 +440,6 @@ void AudioIO::_dsp_thread() {
 
         _write_block(interleaved.data(), BLOCK_SIZE);
         
-        if (_capture_cb) {
-            _capture_cb(interleaved);
-        }
-
         // Update real-time hardware latency for A/V sync 
         auto* b = static_cast<PaBackend*>(_backend);
         if (b && b->stream) {
