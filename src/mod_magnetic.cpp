@@ -194,8 +194,8 @@ void MagneticPath::process(Frame* buf, int n,
         // Don't reset filter state on disable — let it decay naturally.
     }
 
-    // ── 8. OXIDE SHEDDING ─────────────────────────────────────────────────────
-    float shedding = p.oxide_shedding;
+    // ── 8. METAL LOSS — oxide/metal particle shedding (dropouts) ──────────────
+    float shedding = p.tape_metal_loss;
     if (shedding > 0.0f) {
         std::bernoulli_distribution shed_dist(shedding * 0.001);
         std::uniform_real_distribution<float> drop_dist(0.1f, 0.5f);

@@ -75,7 +75,9 @@ struct EngineParams {
     float crosstalk      = 0.0f;
     float print_through  = 0.0f;
     float demagnetization= 0.0f;
-    float oxide_shedding = 0.0f;
+    float tape_metal_loss = 0.0f;
+    float tape_binder_decay = 0.0f;
+    float tape_head_wear = 0.0f;
 
     // Electronics
     float hiss           = 0.001f;
