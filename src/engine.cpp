@@ -357,6 +357,14 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
         }
     }
 
+    // Apply master volume
+    if (p.master_volume != 1.0f) {
+        for (int i = 0; i < n_out; ++i) {
+            out[i].l *= p.master_volume;
+            out[i].r *= p.master_volume;
+        }
+    }
+
     // Post-preset fade-in
     const int FADE_SAMPS = 512;
     if (_fade_in > 0) {

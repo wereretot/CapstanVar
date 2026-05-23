@@ -89,6 +89,7 @@ struct EngineParams {
     float sticky_shed    = 0.0f;
 
     // Meta (not exposed as sliders)
+    float master_volume    = 1.0f;
     std::string oxide_type = "Fe2O3";
     bool is_reversed       = false;
     float motor_engage     = 1.0f;

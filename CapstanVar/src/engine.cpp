@@ -312,8 +312,10 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
     // Output limiter (analog-style soft clip)
     const float KNEE = 0.97f;
     for (int i = 0; i < n_out; ++i) {
-        out[i].l = fast_tanh(out[i].l / KNEE) * KNEE;
-        out[i].r = fast_tanh(out[i].r / KNEE) * KNEE;
+        float l = out[i].l * p.master_volume;
+        float r = out[i].r * p.master_volume;
+        out[i].l = fast_tanh(l / KNEE) * KNEE;
+        out[i].r = fast_tanh(r / KNEE) * KNEE;
     }
 
     // Post-preset fade-in

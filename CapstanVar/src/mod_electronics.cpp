@@ -172,9 +172,12 @@ void ElectronicComponents::process(Frame* buf, int n,
     float dynamic_hiss = hiss_amt * oxide_factor / std::max(std::sqrt(speed_factor), 0.01f);
 
     if (dynamic_hiss > 0.0f) {
-        for (int i = 0; i < n; ++i) {
-            buf[i].l += _rand_normal() * dynamic_hiss;
-            buf[i].r += _rand_normal() * dynamic_hiss;
+        float white_noise_gain = dynamic_hiss * (1.0f - p.hiss_color);
+        if (white_noise_gain > 0.0f) {
+            for (int i = 0; i < n; ++i) {
+                buf[i].l += _rand_normal() * white_noise_gain;
+                buf[i].r += _rand_normal() * white_noise_gain;
+            }
         }
     }
 
