@@ -17,6 +17,13 @@
 
 enum class TransportMode { Stopped, Playing, Shuttle };
 
+// Physical medium type for transport behavior
+enum class TransportMediumType {
+    Tape,           // Helical tape - supports shuttle
+    OpticalDisc,    // LaserDisc - supports fast seek
+    CapacitanceDisc // CED/VHD - groove tracked, no shuttle
+};
+
 class AudioIO {
 public:
     explicit AudioIO(TapeEngine& engine);
@@ -54,12 +61,18 @@ public:
     void set_vu_response(int response) { _vu_response.store(response); }
     int  get_vu_response() const { return _vu_response.load(); }
 
+    // ── Physical medium type for transport restrictions ────────────────────
+    void set_medium_type(TransportMediumType type) { _medium_type.store(type); }
+    TransportMediumType get_medium_type() const { return _medium_type.load(); }
+    bool can_shuttle() const { return _medium_type.load() != TransportMediumType::CapacitanceDisc; }
+
     // ── Capture callback — receives processed interleaved audio ─────────────────
     // Passes processed stereo interleaved samples to a callback for export/sync
     void set_capture_callback(std::function<void(const std::vector<float>&)> cb) { _capture_callback = std::move(cb); }
 
 private:
     TapeEngine& _engine;
+    std::atomic<TransportMediumType> _medium_type{TransportMediumType::Tape};
 
     // ── VU Meter state — written by DSP thread, read by UI ───────────────────
     std::atomic<float> _level_left{0.f};

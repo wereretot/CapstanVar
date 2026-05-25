@@ -16,6 +16,21 @@ static constexpr int   BLOCK_SIZE  = 1024;
 static constexpr int   MAX_CHANNELS = 2;
 using std::lerp;
 
+// ── Audio track type (mirrored from main.cpp for CapstanVar library) ────────────
+enum class AudioTrackType {
+    LinearOnly,         // Traditional longitudinal audio track
+    HiFiOnly,           // FM depth-multiplexed audio only
+    LinearAndHiFi,      // Both tracks available
+    DigitalPCM,         // Digital audio track
+    None                // No audio
+};
+
+enum class AudioSource {
+    Linear,             // Use linear audio track
+    HiFi,               // Use HiFi FM audio track
+    Auto                // Automatic selection
+};
+
 // ── Stereo sample ─────────────────────────────────────────────────────────────
 struct Frame {
     float l = 0.0f;
@@ -85,8 +100,20 @@ struct EngineParams {
     float mains_hum      = 0.0f;
     float cutoff_base    = 18000.0f;
     float head_bump      = 0.5f;
+    float head_bump_freq_mult = 1.0f;   // Format-specific head bump frequency multiplier
+    float head_bump_q    = 1.5f;         // Head bump resonance Q
     float azimuth_drift  = 0.05f;
     float sticky_shed    = 0.0f;
+    
+    // HiFi Audio (for formats that support depth-multiplexed FM audio)
+    bool  hifi_enabled   = false;        // Whether HiFi audio is active
+    float hifi_carrier_left_hz  = 1.7e6f; // Left channel FM carrier
+    float hifi_carrier_right_hz = 1.3e6f; // Right channel FM carrier
+    float hifi_deviation_hz     = 150000.0f; // FM deviation
+    float hifi_noise_floor      = -70.0f;    // dB noise floor
+    float hifi_crosstalk        = -45.0f;    // dB channel crosstalk
+    float hifi_dropout_sens     = 0.7f;      // Tracking sensitivity for HiFi
+    int   audio_source     = 0;          // 0=linear, 1=HiFi, 2=auto
 
     // Meta (not exposed as sliders)
     float master_volume    = 1.0f;

@@ -43,4 +43,20 @@ private:
     
     // HiFi buzz state
     float _hifi_phase = 0.0f;
+    
+    // HiFi FM processing state
+    float _hifi_fm_phase_l = 0.0f;    // FM phase accumulator for left channel
+    float _hifi_fm_phase_r = 0.0f;    // FM phase accumulator for right channel
+    float _hifi_preemph_last_l = 0.0f; // Pre-emphasis state
+    float _hifi_preemph_last_r = 0.0f;
+    float _hifi_deemph_last_l = 0.0f;  // De-emphasis state
+    float _hifi_deemph_last_r = 0.0f;
+    float _hifi_quality = 1.0f;        // Current HiFi signal quality (0-1)
+    
+    // HiFi processing methods
+    void _processHiFiAudio(Frame* buf, int n, float speed_factor, const EngineParams& p);
+    void _processLinearAudio(Frame* buf, int n, float speed_factor, float sticky_drag, 
+                           float current_time, const EngineParams& p);
+    float _fmModulate(float audio_sample, float carrier_freq, float deviation, float& phase);
+    float _fmDemodulate(float fm_sample, float& last_phase);
 };

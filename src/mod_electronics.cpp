@@ -21,6 +21,16 @@ void ElectronicComponents::reset() {
     _az_delay_buf.fill({});
     _pink_state[0] = _pink_state[1] = 0.0f;
     _diff_last = {};
+    
+    // Reset HiFi state
+    _hifi_phase = 0.0f;
+    _hifi_fm_phase_l = 0.0f;
+    _hifi_fm_phase_r = 0.0f;
+    _hifi_preemph_last_l = 0.0f;
+    _hifi_preemph_last_r = 0.0f;
+    _hifi_deemph_last_l = 0.0f;
+    _hifi_deemph_last_r = 0.0f;
+    _hifi_quality = 1.0f;
 }
 
 float ElectronicComponents::_rand_normal() {
@@ -40,18 +50,99 @@ float ElectronicComponents::_rand_uniform() {
     return (float)(_rng >> 11) * (1.f/(float)(1ULL<<53));
 }
 
-void ElectronicComponents::process(Frame* buf, int n,
-                                   float current_time,
-                                   float speed_factor,
-                                   float sticky_drag,
-                                   const EngineParams& p)
-{
+// HiFi FM modulation - simulates FM audio at baseband rates
+// Real VHS HiFi uses 1.3/1.7 MHz carriers, but we simulate at audio frequencies
+float ElectronicComponents::_fmModulate(float audio_sample, float carrier_freq, float deviation, float& phase) {
+    // Scale down to audio-range frequencies for simulation
+    // Map 1.3-1.7 MHz down to ~3-5 kHz range for audible simulation
+    float simulated_carrier = carrier_freq * 0.0025f; // Scale MHz to kHz range
+    float simulated_deviation = deviation * 0.0025f;
+    
+    // FM modulation: phase accumulator
+    float freq = simulated_carrier + simulated_deviation * audio_sample;
+    phase += TWO_PI * freq / SR_F;
+    while (phase > TWO_PI) phase -= TWO_PI;
+    
+    return std::cos(phase);
+}
+
+// FM demodulation using phase differentiator
+float ElectronicComponents::_fmDemodulate(float fm_sample, float& last_phase) {
+    // For a real FM signal, we track instantaneous frequency by phase derivative
+    // Reconstruct phase from the FM sample (which is cos(phase))
+    float phase = std::acos(std::clamp(fm_sample, -1.0f, 1.0f));
+    
+    // Handle phase wrapping
+    float delta = phase - last_phase;
+    if (delta > PI) delta -= TWO_PI;
+    if (delta < -PI) delta += TWO_PI;
+    
+    last_phase = phase;
+    
+    // Convert frequency deviation back to audio
+    return delta * SR_F / TWO_PI / 1000.0f; // Scale down
+}
+
+// Process HiFi audio path - simplified version that simulates HiFi characteristics
+void ElectronicComponents::_processHiFiAudio(Frame* buf, int n, float speed_factor, const EngineParams& p) {
+    if (!p.hifi_enabled) return;
+    
+    // Calculate HiFi signal quality based on tracking error and dropout
+    // When tracking is bad, quality drops toward 0 (use linear only)
+    // When tracking is good, quality is 1 (use HiFi only)
+    float tracking_factor = 1.0f - std::min(p.tracking_error * p.hifi_dropout_sens * 3.0f, 1.0f);
+    float dropout_factor = 1.0f - std::min(p.dropout_rate * 4.0f, 1.0f);
+    float target_quality = tracking_factor * dropout_factor;
+    
+    // Smooth quality changes - slower drop, faster recovery
+    if (target_quality < _hifi_quality) {
+        // Quality dropping - HiFi losing lock (fast)
+        _hifi_quality += (target_quality - _hifi_quality) * 0.2f;
+    } else {
+        // Quality improving - HiFi relocking (slower)
+        _hifi_quality += (target_quality - _hifi_quality) * 0.05f;
+    }
+    _hifi_quality = std::clamp(_hifi_quality, 0.0f, 1.0f);
+    
+    // If quality is very low, mute the HiFi (analogous to FM mute circuit)
+    if (_hifi_quality < 0.1f) {
+        // HiFi signal lost - output will be pure linear from the blend in process()
+        return;
+    }
+    
+    // HiFi noise floor (FM hiss)
+    float noise_linear = std::pow(10.0f, p.hifi_noise_floor / 20.0f) * 0.01f;
+    
+    for (int i = 0; i < n; ++i) {
+        float orig_l = buf[i].l;
+        float orig_r = buf[i].r;
+        
+        // Add FM noise
+        float hifi_l = orig_l + _rand_normal() * noise_linear;
+        float hifi_r = orig_r + _rand_normal() * noise_linear;
+        
+        // Add crosstalk between channels
+        float crosstalk_linear = std::pow(10.0f, p.hifi_crosstalk / 20.0f);
+        hifi_l += hifi_r * crosstalk_linear;
+        hifi_r += hifi_l * crosstalk_linear;
+        
+        // Store HiFi-processed signal (will be blended with linear in process())
+        buf[i].l = hifi_l;
+        buf[i].r = hifi_r;
+    }
+}
+
+// Process Linear audio path
+void ElectronicComponents::_processLinearAudio(Frame* buf, int n, float speed_factor, float sticky_drag, 
+                                              float current_time, const EngineParams& p) {
     // ── 1. HEAD BUMP ──────────────────────────────────────────────────────────
     float bump_amt = p.head_bump;
     if (bump_amt > 0.0f) {
-        float bump_f = std::clamp(50.0f * speed_factor, 15.0f, 600.0f);
-        float Q      = 1.5f;
-        float bw     = bump_f / Q;
+        // Format-specific head bump frequency with multiplier
+        float bump_f_base = std::clamp(50.0f * speed_factor, 15.0f, 600.0f);
+        float bump_f = bump_f_base * p.head_bump_freq_mult;  // Apply format-specific multiplier
+        float Q = p.head_bump_q;  // Format-specific Q factor
+        float bw = bump_f / Q;
         float fc_key = bump_f; // use centre freq as cache key
         if (std::abs(fc_key - _bump_fc_last) > 0.5f) {
             float lo = std::clamp((bump_f - bw*0.5f) / (SR_F*0.5f), 1e-4f, 0.499f);
@@ -87,12 +178,6 @@ void ElectronicComponents::process(Frame* buf, int n,
     // ── 3. AZIMUTH PHASE WANDER ───────────────────────────────────────────────
     // Models head gap angle variation causing HF phase difference between channels.
     // The right channel is delayed by a slowly-wandering fractional sample count.
-    //
-    // Fixes vs original:
-    //  - _azimuth_state is bounded with a leaky integrator (prevents fast zero-crossings)
-    //  - delay_samp is smoothed per-block to prevent inter-block discontinuities
-    //  - shift & frac are computed consistently from the clamped/smoothed value
-    //  - frac is always in [0,1) so lerp never extrapolates
     float az_drift = p.azimuth_drift;
     if (az_drift > 0.0f) {
         // Bounded random walk: leak toward zero so state stays near [-pi, +pi]
@@ -103,7 +188,6 @@ void ElectronicComponents::process(Frame* buf, int n,
         float target_delay = std::sin(_azimuth_state) * az_drift * (float)(AZ_BUF / 2);
 
         // Smooth the delay change per-block to prevent discontinuity clicks
-        // Ramp rate: at most 0.5 sample per block (~23ms at 44100/1024)
         float max_delta = 0.5f;
         if (target_delay > _az_delay_smooth + max_delta)
             _az_delay_smooth += max_delta;
@@ -117,15 +201,12 @@ void ElectronicComponents::process(Frame* buf, int n,
                                    -(float)(AZ_BUF - 2), (float)(AZ_BUF - 2));
 
         // Split into integer + fractional for interpolation
-        // Always use positive frac by adjusting integer part
         int   delay_i = (int)std::floor(delay_f);
         float frac    = delay_f - (float)delay_i;   // always in [0, 1)
 
         int buf_len = AZ_BUF;
 
         // Copy original right channel BEFORE overwriting it.
-        // This is critical — the delay buffer must store the unmodified signal,
-        // not the already-delayed output (which would create feedback).
         std::vector<float> orig_r(n);
         for (int i = 0; i < n; ++i) orig_r[i] = buf[i].r;
 
@@ -208,23 +289,60 @@ void ElectronicComponents::process(Frame* buf, int n,
         _pink_state[0] = s0;
         _pink_state[1] = s1;
     }
+}
 
-    // Characteristic 60Hz pulse-buzz seen when helical HiFi heads lose tracking.
-    // It's a sharp, metallic "tearing" sound synced to the field rate.
-    float hifi_amt = p.dropout_rate * 0.4f + p.tracking_error * 0.6f + p.motor_drag * 0.1f;
-    if (hifi_amt > 0.001f) {
-
-        float hifi_hz = 59.94f * speed_factor;
-        float hifi_inc = hifi_hz / SR_F;
+void ElectronicComponents::process(Frame* buf, int n,
+                                   float current_time,
+                                   float speed_factor,
+                                   float sticky_drag,
+                                   const EngineParams& p)
+{
+    // Store original audio for potential HiFi blending
+    std::vector<Frame> original(buf, buf + n);
+    
+    // Process linear audio path (always processed as fallback)
+    _processLinearAudio(buf, n, speed_factor, sticky_drag, current_time, p);
+    
+    // Store linear-processed audio
+    std::vector<Frame> linear(buf, buf + n);
+    
+    // If HiFi is enabled, process through HiFi FM chain
+    if (p.hifi_enabled) {
+        // Restore original for HiFi processing
         for (int i = 0; i < n; ++i) {
-            _hifi_phase = std::fmod(_hifi_phase + hifi_inc, 1.0f);
-            // Pulse window (simulating head switching interference)
-            if (_hifi_phase < 0.035f) {
-                float pulse = std::sin(_hifi_phase * TWO_PI * 15.0f); // metallic harmonic
-                float crackle = el_normal(el_rng) * 0.4f;
-                float buzz = (pulse + crackle) * hifi_amt * 0.25f;
-                buf[i].l += buzz;
-                buf[i].r += buzz;
+            buf[i] = original[i];
+        }
+        
+        // Process HiFi audio
+        _processHiFiAudio(buf, n, speed_factor, p);
+        
+        // Blend between HiFi and Linear based on HiFi quality
+        // When HiFi quality drops, we fade to linear track
+        for (int i = 0; i < n; ++i) {
+            buf[i].l = buf[i].l * _hifi_quality + linear[i].l * (1.0f - _hifi_quality);
+            buf[i].r = buf[i].r * _hifi_quality + linear[i].r * (1.0f - _hifi_quality);
+        }
+    }
+    
+    // ── HiFi PULSE-BUZZ (tracking interference) ────────────────────────────
+    // Characteristic 60Hz pulse-buzz seen when helical HiFi heads lose tracking.
+    // Only active when HiFi is enabled and tracking is poor.
+    if (p.hifi_enabled) {
+        float hifi_amt = (p.dropout_rate * 0.4f + p.tracking_error * p.hifi_dropout_sens + p.motor_drag * 0.1f) 
+                         * (1.0f - _hifi_quality) * 2.0f; // Stronger when quality is poor
+        if (hifi_amt > 0.001f) {
+            float hifi_hz = 59.94f * speed_factor;
+            float hifi_inc = hifi_hz / SR_F;
+            for (int i = 0; i < n; ++i) {
+                _hifi_phase = std::fmod(_hifi_phase + hifi_inc, 1.0f);
+                // Pulse window (simulating head switching interference)
+                if (_hifi_phase < 0.035f) {
+                    float pulse = std::sin(_hifi_phase * TWO_PI * 15.0f); // metallic harmonic
+                    float crackle = el_normal(el_rng) * 0.4f;
+                    float buzz = (pulse + crackle) * hifi_amt * 0.25f;
+                    buf[i].l += buzz;
+                    buf[i].r += buzz;
+                }
             }
         }
     }
