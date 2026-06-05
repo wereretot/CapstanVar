@@ -30,6 +30,10 @@ public:
     float motor_engage        = 0.0f;
     float sticky_drag         = 0.0f;
     
+    // Capstan Servo PID state
+    float _capstan_integral   = 0.0f;
+    float _capstan_prev_error = 0.0f;
+    
     // Speed history for synchronous A/V warping (indexed by absolute play_head)
     static constexpr int SPEED_HIST_SIZE = 262144; // ~6 seconds at 44.1kHz
     float speed_history[SPEED_HIST_SIZE] = {};

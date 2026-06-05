@@ -14,13 +14,19 @@ public:
                  const EngineParams& p);
 
 private:
-    // Head bump bandpass
-    Biquad  _bump_f;
-    float   _bump_fc_last = -1.0f;
+    // Head bump comb filter (Contour effect)
+    static constexpr int BUMP_BUF_SIZE = 4096;
+    std::array<Frame, BUMP_BUF_SIZE> _bump_delay_buf = {};
+    int _bump_write_idx = 0;
 
-    // Azimuth lowpass
+    // Azimuth / Spacing lowpass
     Biquad  _az_f;
     float   _az_fc_last   = -1.0f;
+
+    // Gap loss FIR
+    static constexpr int GAP_BUF_SIZE = 512;
+    std::array<Frame, GAP_BUF_SIZE> _gap_delay_buf = {};
+    int _gap_write_idx = 0;
 
     // Azimuth phase delay buffer (128 samples headroom)
     static constexpr int AZ_BUF = 128;
@@ -52,6 +58,9 @@ private:
     float _hifi_deemph_last_l = 0.0f;  // De-emphasis state
     float _hifi_deemph_last_r = 0.0f;
     float _hifi_quality = 1.0f;        // Current HiFi signal quality (0-1)
+    
+    float _hifi_demod_phase_l = 0.0f; // Demodulator trackers
+    float _hifi_demod_phase_r = 0.0f;
     
     // HiFi processing methods
     void _processHiFiAudio(Frame* buf, int n, float speed_factor, const EngineParams& p);

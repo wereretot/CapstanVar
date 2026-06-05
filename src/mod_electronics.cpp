@@ -12,10 +12,12 @@ ElectronicComponents::ElectronicComponents() {
 }
 
 void ElectronicComponents::reset() {
-    _bump_f.reset();
-    _bump_fc_last = -1.0f;
+    _bump_delay_buf.fill({});
+    _bump_write_idx = 0;
     _az_f.reset();
     _az_fc_last   = -1.0f;
+    _gap_delay_buf.fill({});
+    _gap_write_idx = 0;
     _azimuth_state  = 0.0f;
     _az_delay_smooth = 0.0f;
     _az_delay_buf.fill({});
@@ -31,6 +33,8 @@ void ElectronicComponents::reset() {
     _hifi_deemph_last_l = 0.0f;
     _hifi_deemph_last_r = 0.0f;
     _hifi_quality = 1.0f;
+    _hifi_demod_phase_l = 0.0f;
+    _hifi_demod_phase_r = 0.0f;
 }
 
 float ElectronicComponents::_rand_normal() {
@@ -87,93 +91,120 @@ float ElectronicComponents::_fmDemodulate(float fm_sample, float& last_phase) {
 void ElectronicComponents::_processHiFiAudio(Frame* buf, int n, float speed_factor, const EngineParams& p) {
     if (!p.hifi_enabled) return;
     
-    // Calculate HiFi signal quality based on tracking error and dropout
-    // When tracking is bad, quality drops toward 0 (use linear only)
-    // When tracking is good, quality is 1 (use HiFi only)
     float tracking_factor = 1.0f - std::min(p.tracking_error * p.hifi_dropout_sens * 3.0f, 1.0f);
     float dropout_factor = 1.0f - std::min(p.dropout_rate * 4.0f, 1.0f);
     float target_quality = tracking_factor * dropout_factor;
     
-    // Smooth quality changes - slower drop, faster recovery
     if (target_quality < _hifi_quality) {
-        // Quality dropping - HiFi losing lock (fast)
         _hifi_quality += (target_quality - _hifi_quality) * 0.2f;
     } else {
-        // Quality improving - HiFi relocking (slower)
         _hifi_quality += (target_quality - _hifi_quality) * 0.05f;
     }
     _hifi_quality = std::clamp(_hifi_quality, 0.0f, 1.0f);
     
-    // If quality is very low, mute the HiFi (analogous to FM mute circuit)
-    if (_hifi_quality < 0.1f) {
-        // HiFi signal lost - output will be pure linear from the blend in process()
-        return;
-    }
+    if (_hifi_quality < 0.1f) return;
     
-    // HiFi noise floor (FM hiss)
     float noise_linear = std::pow(10.0f, p.hifi_noise_floor / 20.0f) * 0.01f;
+    float crosstalk_linear = std::pow(10.0f, p.hifi_crosstalk / 20.0f);
     
     for (int i = 0; i < n; ++i) {
         float orig_l = buf[i].l;
         float orig_r = buf[i].r;
         
-        // Add FM noise
-        float hifi_l = orig_l + _rand_normal() * noise_linear;
-        float hifi_r = orig_r + _rand_normal() * noise_linear;
+        // Crosstalk before modulation
+        float ct_l = orig_l + orig_r * crosstalk_linear;
+        float ct_r = orig_r + orig_l * crosstalk_linear;
         
-        // Add crosstalk between channels
-        float crosstalk_linear = std::pow(10.0f, p.hifi_crosstalk / 20.0f);
-        hifi_l += hifi_r * crosstalk_linear;
-        hifi_r += hifi_l * crosstalk_linear;
+        // Pre-emphasis (1T high shelf approx)
+        float pre_l = ct_l + 0.85f * (ct_l - _hifi_preemph_last_l);
+        float pre_r = ct_r + 0.85f * (ct_r - _hifi_preemph_last_r);
+        _hifi_preemph_last_l = ct_l;
+        _hifi_preemph_last_r = ct_r;
         
-        // Store HiFi-processed signal (will be blended with linear in process())
-        buf[i].l = hifi_l;
-        buf[i].r = hifi_r;
+        // FM Modulation
+        float fm_l = _fmModulate(pre_l, p.hifi_carrier_left_hz, p.hifi_deviation_hz, _hifi_fm_phase_l);
+        float fm_r = _fmModulate(pre_r, p.hifi_carrier_right_hz, p.hifi_deviation_hz, _hifi_fm_phase_r);
+        
+        // Inject Tape RF Noise (scales up as quality drops)
+        float noise_injector = noise_linear * (2.0f - _hifi_quality);
+        fm_l += _rand_normal() * noise_injector;
+        fm_r += _rand_normal() * noise_injector;
+        
+        // FM Demodulation
+        float demod_l = _fmDemodulate(fm_l, _hifi_demod_phase_l);
+        float demod_r = _fmDemodulate(fm_r, _hifi_demod_phase_r);
+        
+        // De-emphasis
+        float deemph_l = _hifi_deemph_last_l * 0.85f + demod_l * 0.15f;
+        float deemph_r = _hifi_deemph_last_r * 0.85f + demod_r * 0.15f;
+        _hifi_deemph_last_l = deemph_l;
+        _hifi_deemph_last_r = deemph_r;
+        
+        buf[i].l = deemph_l;
+        buf[i].r = deemph_r;
     }
 }
 
 // Process Linear audio path
 void ElectronicComponents::_processLinearAudio(Frame* buf, int n, float speed_factor, float sticky_drag, 
                                               float current_time, const EngineParams& p) {
-    // ── 1. HEAD BUMP ──────────────────────────────────────────────────────────
+    // ── 1. HEAD BUMP (Contour Effect Comb Filter) ─────────────────────────────
     float bump_amt = p.head_bump;
     if (bump_amt > 0.0f) {
-        // Format-specific head bump frequency with multiplier
-        float bump_f_base = std::clamp(50.0f * speed_factor, 15.0f, 600.0f);
-        float bump_f = bump_f_base * p.head_bump_freq_mult;  // Apply format-specific multiplier
-        float Q = p.head_bump_q;  // Format-specific Q factor
-        float bw = bump_f / Q;
-        float fc_key = bump_f; // use centre freq as cache key
-        if (std::abs(fc_key - _bump_fc_last) > 0.5f) {
-            float lo = std::clamp((bump_f - bw*0.5f) / (SR_F*0.5f), 1e-4f, 0.499f);
-            float hi = std::clamp((bump_f + bw*0.5f) / (SR_F*0.5f), lo+1e-4f, 0.4999f);
-            butter_bp(lo, hi, _bump_f);
-            // No reset: preserve IIR state across coefficient update
-            _bump_fc_last = fc_key;
-        }
-        // Apply: out = in + bump_sig * amt
-        // Make a copy, filter it, add back
-        std::vector<Frame> bump_buf(buf, buf+n);
-        _bump_f.process(bump_buf.data(), n);
+        float bump_f_base = std::clamp(50.0f * speed_factor, 5.0f, 600.0f);
+        float bump_f = bump_f_base * p.head_bump_freq_mult;
+        
+        // Delay calculated so null is at DC, peak is at head bump freq
+        int d_samps = std::clamp((int)(SR_F / (2.0f * std::max(bump_f, 1.0f))), 1, BUMP_BUF_SIZE - 2);
+        
         for (int i = 0; i < n; ++i) {
-            buf[i].l += bump_buf[i].l * bump_amt;
-            buf[i].r += bump_buf[i].r * bump_amt;
+            _bump_delay_buf[_bump_write_idx] = buf[i];
+            
+            int read_idx = (_bump_write_idx - d_samps + BUMP_BUF_SIZE) % BUMP_BUF_SIZE;
+            
+            // Out = In - delayed * amt (Null at 0Hz, Peak at bump_f)
+            buf[i].l += (buf[i].l - _bump_delay_buf[read_idx].l) * bump_amt * 0.5f;
+            buf[i].r += (buf[i].r - _bump_delay_buf[read_idx].r) * bump_amt * 0.5f;
+            
+            _bump_write_idx = (_bump_write_idx + 1) % BUMP_BUF_SIZE;
         }
     }
 
-    // ── 2. AZIMUTH LOWPASS ────────────────────────────────────────────────────
-    float cutoff     = p.cutoff_base;
+    // ── 2. GAP LOSS AND SPACING LOSS (TAPE SPEED EFFECT) ─────────────────────
+    float tape_velocity_m_s = p.ips_base * speed_factor * 0.0254f;
+    float gap_width_m = 1.5e-6f; // typical playback head gap
+    float gap_time = gap_width_m / std::max(tape_velocity_m_s, 0.001f);
+    float gap_samples_f = gap_time * SR_F;
+    
+    // Spacing loss (Wallace: 54.6 * d / lambda) -> Rolloff mapped to leaky integrator
+    float spacing_loss_d = 0.3e-6f; 
+    float spacing_cutoff = tape_velocity_m_s / (1.5f * PI * spacing_loss_d) * 1.5f;
     float shed_factor = std::clamp(1.0f - sticky_drag * 50.0f, 0.05f, 1.0f);
-    float safe_cut   = std::clamp(cutoff * speed_factor * shed_factor, 80.0f, 20000.0f);
-    float fc_norm    = std::clamp(safe_cut / (SR_F * 0.5f), 1e-4f, 0.4999f);
-    // Only recompute coefficients when cutoff changes by >0.5 Hz (inaudible threshold).
-    // Do NOT reset state on update — that causes a click every block.
-    if (std::abs(safe_cut - _az_fc_last) > 0.5f) {
-        butter_lp(fc_norm, _az_f);
-        // No reset: preserve state, accept brief coefficient-update transient
+    float safe_cut = std::clamp(spacing_cutoff * shed_factor, 100.0f, 20000.0f);
+    
+    if (std::abs(safe_cut - _az_fc_last) > 10.0f) {
+        butter_lp(safe_cut / (SR_F * 0.5f), _az_f);
         _az_fc_last = safe_cut;
     }
     _az_f.process(buf, n);
+
+    // Gap Loss FIR Filter (moving average)
+    int gap_samples_int = std::clamp((int)std::ceil(gap_samples_f), 1, GAP_BUF_SIZE - 2);
+    if (gap_samples_int > 1) {
+        float gap_weight = 1.0f / gap_samples_int;
+        for (int i = 0; i < n; ++i) {
+            _gap_delay_buf[_gap_write_idx] = buf[i];
+            float sum_l = 0.0f, sum_r = 0.0f;
+            for (int j = 0; j < gap_samples_int; ++j) {
+                int read_idx = (_gap_write_idx - j + GAP_BUF_SIZE) % GAP_BUF_SIZE;
+                sum_l += _gap_delay_buf[read_idx].l;
+                sum_r += _gap_delay_buf[read_idx].r;
+            }
+            buf[i].l = sum_l * gap_weight;
+            buf[i].r = sum_r * gap_weight;
+            _gap_write_idx = (_gap_write_idx + 1) % GAP_BUF_SIZE;
+        }
+    }
 
     // ── 3. AZIMUTH PHASE WANDER ───────────────────────────────────────────────
     // Models head gap angle variation causing HF phase difference between channels.
@@ -250,7 +281,7 @@ void ElectronicComponents::_processLinearAudio(Frame* buf, int n, float speed_fa
     for (auto& o : oxide_noise)
         if (p.oxide_type == o.name) { oxide_factor = o.factor; break; }
 
-    float dynamic_hiss = hiss_amt * oxide_factor / std::max(std::sqrt(speed_factor), 0.01f);
+    float dynamic_hiss = hiss_amt * oxide_factor / std::max(speed_factor, 0.005f);
 
     if (dynamic_hiss > 0.0f) {
         for (int i = 0; i < n; ++i) {

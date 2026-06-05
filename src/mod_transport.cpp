@@ -25,6 +25,8 @@ void TransportDynamics::reset() {
     sticky_drag         = 0.0f;
     last_instant_speed  = 0.0f;
     motor_engage        = 0.0f;
+    _capstan_integral   = 0.0f;
+    _capstan_prev_error = 0.0f;
     _fight_phase        = 0.0f;
     _fight_lurch_timer  = 0.0f;
     _fight_lurch_mag    = 0.0f;
@@ -196,9 +198,21 @@ TransportResult TransportDynamics::process(int frames, float current_time,
             tension_mod = std::clamp(raw, -limit, limit);
         }
 
-        // Integrate motor speed
+        // Integrate motor speed via Capstan PID Servo
         float instant_target = target_speed + drift;
-        current_motor_speed += (instant_target - current_motor_speed) * lag_coeff;
+        float error = instant_target - current_motor_speed;
+        
+        _capstan_integral += error; // anti-windup/clamping omitted for simplicity, motor engage handles bounds
+        float derivative = error - _capstan_prev_error;
+        _capstan_prev_error = error;
+        
+        // Tuned to react similarly to original IIR lag but with proper PID hunting 
+        float Kp = 0.7f * lag_coeff;
+        float Ki = lag_coeff * 0.01f;
+        float Kd = lag_coeff * 0.08f;
+        
+        float pid_out = (Kp * error) + (Ki * _capstan_integral) + (Kd * derivative);
+        current_motor_speed += std::clamp(pid_out, -0.05f, 0.05f);
 
         float speed = current_motor_speed + roller_wow + supply_wow + takeup_wow
                     + flutter + tension_mod;
@@ -217,7 +231,9 @@ TransportResult TransportDynamics::process(int frames, float current_time,
 
     // ── Dropout events ────────────────────────────────────────────────────────
     const int FADE = 176;
-    float rate = p.dropout_rate;
+    ips_ratio = p.ips_base / 15.0f;
+    // Slower tape = fewer events per second, but each event lasts longer
+    float rate = p.dropout_rate * std::max(ips_ratio, 0.1f);
     _dropout_timer += (float)frames / SR_F;
 
     // Carry-over from previous block
@@ -241,10 +257,11 @@ TransportResult TransportDynamics::process(int frames, float current_time,
         while (_dropout_timer >= _next_dropout) {
             float overshoot = _dropout_timer - _next_dropout;
             int s = (int)std::clamp(overshoot * SR_F, 0.0f, (float)(frames - 1));
-            float max_dur  = 0.005f + rate * 0.040f;
+            // Slower tape speed linearly scales dropout duration
+            float max_dur  = (0.005f + p.dropout_rate * 0.040f) / std::max(ips_ratio, 0.05f);
             float dur_s    = 0.001f + _rand_uniform() * (max_dur - 0.001f);
             int   dur_samp = (int)(dur_s * SR_F);
-            float depth    = (0.7f + _rand_uniform() * 0.3f) * std::clamp(rate, 0.f, 1.f);
+            float depth    = (0.7f + _rand_uniform() * 0.3f) * std::clamp(p.dropout_rate, 0.f, 1.f);
 
             int fade = std::min(FADE, dur_samp / 3);
             // Build envelope inline, applying directly to mask
