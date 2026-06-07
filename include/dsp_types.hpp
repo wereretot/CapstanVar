@@ -122,6 +122,9 @@ struct EngineParams {
     float motor_engage     = 1.0f;
     float tape_speed_mult  = 1.0f;  // actual read stride (1=normal, 40=shuttle, <1=spindown)
     bool presaturated      = false;
+    // Derived motor artifact controls (set by application mapping)
+    float motor_cog_strength = 0.0f;    // discrete cogging/notches amplitude
+    float motor_vibration_strength = 0.0f; // broadband vibration amplitude
 };
 
 // ── 2-pole IIR filter state ───────────────────────────────────────────────────
