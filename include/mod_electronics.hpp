@@ -32,9 +32,6 @@ private:
     Biquad  _eq_hf;                      // high-shelf at fc = 1/(2π·τ_hf)
     float   _eq_hf_fc_last = -1.0f;
     float   _eq_hf_db_last = -999.0f;
-    EQCurve _eq_curve_last = EQCurve::Legacy;
-    bool    _eq_in_use     = false;      // tracks whether standard EQ path was last taken
-
     // Azimuth phase delay buffer (128 samples headroom)
     static constexpr int AZ_BUF = 128;
     std::array<Frame, AZ_BUF> _az_delay_buf = {};

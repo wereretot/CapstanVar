@@ -92,7 +92,6 @@ void ElectronicComponents::process(Frame* buf, int n,
             _az_fc_last = safe_cut;
         }
         _az_f.process(buf, n);
-        _eq_in_use = false;
     } else {
         // Standard playback EQ path — RBJ low + high shelves with implicit +
         // user-trim gain. Cache re-cook only on meaningful param change so we
@@ -117,8 +116,6 @@ void ElectronicComponents::process(Frame* buf, int n,
         }
         _eq_lf.process(buf, n);
         _eq_hf.process(buf, n);
-        _eq_curve_last = p.eq_curve;
-        _eq_in_use     = true;
     }
 
     // ── 3. AZIMUTH PHASE WANDER ───────────────────────────────────────────────
