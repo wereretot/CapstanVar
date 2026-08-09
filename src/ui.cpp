@@ -1797,6 +1797,14 @@ void CapstanApp::_draw_notifications() {
                 text_col = IM_COL32(255,180,180,255);
                 bg_col   = IM_COL32(80,20,20,200);
                 break;
+            default:
+                // Neutral grey for any unrecognised severity (e.g., a future
+                // enum value). Mirrors the "?" / reset fallback used by
+                // err_severity_icon() and err_severity_color().
+                icon_col = IM_COL32(160,160,170,255);
+                text_col = IM_COL32(200,200,210,255);
+                bg_col   = IM_COL32(45,45,55,200);
+                break;
             }
             
             // Background
