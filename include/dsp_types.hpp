@@ -27,18 +27,50 @@ struct Frame {
 };
 
 // ── Oxide presets ─────────────────────────────────────────────────────────────
+// OxideProps holds per-tape-stock physics data used by MagneticPath's
+// saturation block and ElectronicComponents' hiss mixer. Phase 1 of the
+// tape-physics refactor: expand OxideProps and populate 10 reference stocks.
+//
+// The first three fields (Hc/Ms/bias_trim) keep their existing semantics so
+// the 30+ built-in presets remain byte-identical. New fields below are
+// STAGED — runtime ignores them in Phase 1; Phase 2 will use mol_thd3_db to
+// remap the saturator's knee/ceiling, Phase 3 will use sens_* and
+// hysteresis_amt with the new Preisach LUT. See docs/TAPE_PHYSICS_REFACTOR.md.
 struct OxideProps {
-    float Hc;         // coercivity (Oersted)
-    float Ms;         // saturation magnetisation (normalised)
-    float bias_trim;  // optimal bias multiplier
+    // Phase 1 — read by MagneticPath::saturate_only and MagneticPath::process
+    float Hc;                  // coercivity (Oersted)
+    float Ms;                  // saturation magnetisation (normalised)
+    float bias_trim;           // optimal bias multiplier
+
+    // Phase 2+ — STAGED, runtime-ignored in Phase 1
+    float mol_thd3_db;         // MOL @ 3% THD, dB ref 200 nWb/m
+    float sens_1k;             // sensitivity at 1 kHz, linear (1.0 by definition)
+    float sens_10k;            // sensitivity at 10 kHz, linear rel. to 1 kHz
+    float sens_15k;            // sensitivity at 15 kHz, linear rel. to 1 kHz
+    float hf_rolloff_db_oct;   // HF rolloff above ~12 kHz, dB/oct (negative)
+    float hiss_floor_db;       // hiss floor in dB below MOL
+    float hysteresis_amt;      // 0..1 weight of Preisach hysteresis (Phase 3)
 };
 
+// 10 reference stocks. The 4 legacy keys (Fe2O3/CrO2/Metal/FeCo) keep their
+// Hc/Ms/bias_trim byte-identical to the pre-refactor values → audibility
+// preserved for the 30+ built-in presets that still reference them. The 6
+// new keys (456/SM911/SM900/GP9/Maxell_UD/BASF_LH) carry MRL-style data and
+// are available for Phase 6 preset reauthoring.
 inline const std::unordered_map<std::string, OxideProps>& oxide_presets() {
     static const std::unordered_map<std::string, OxideProps> P = {
-        {"Fe2O3", {250.0f,  1.0f,  1.00f}},
-        {"CrO2",  {480.0f,  1.2f,  1.35f}},
-        {"Metal", {1400.0f, 1.8f,  1.70f}},
-        {"FeCo",  {700.0f,  1.4f,  1.40f}},
+        // ── Legacy — Hc/Ms/bias_trim byte-identical to pre-refactor values ──
+        {"Fe2O3", {250.0f,  1.0f,  1.00f, +6.0f, 1.0f, 0.85f, 0.65f, -5.0f, -65.0f, 0.05f}},
+        {"CrO2",  {480.0f,  1.2f,  1.35f, +5.0f, 1.0f, 1.00f, 0.71f, -4.0f, -68.0f, 0.10f}},
+        {"Metal", {1400.0f, 1.8f,  1.70f, +7.0f, 1.0f, 0.89f, 0.63f, -2.5f, -70.0f, 0.20f}},
+        {"FeCo",  {700.0f,  1.4f,  1.40f, +6.0f, 1.0f, 0.85f, 0.55f, -5.5f, -66.0f, 0.05f}},
+        // ── New Phase-1 additions (MRL/Tape-Stock reference data) ──
+        {"456",       {320.0f, 1.15f, 1.05f, +6.0f, 1.0f, 0.89f, 0.71f, -4.0f, -65.0f, 0.10f}},
+        {"SM911",     {320.0f, 1.20f, 1.05f, +6.5f, 1.0f, 0.89f, 0.79f, -4.0f, -66.0f, 0.10f}},
+        {"SM900",     {360.0f, 1.30f, 1.10f, +9.0f, 1.0f, 0.71f, 0.50f, -3.5f, -68.0f, 0.15f}},
+        {"GP9",       {370.0f, 1.35f, 1.15f, +9.0f, 1.0f, 0.67f, 0.45f, -3.5f, -67.5f, 0.15f}},
+        {"Maxell_UD", {280.0f, 1.00f, 1.00f, +4.0f, 1.0f, 0.84f, 0.63f, -5.0f, -62.0f, 0.05f}},
+        {"BASF_LH",   {300.0f, 1.05f, 1.00f, +4.0f, 1.0f, 0.63f, 0.40f, -6.0f, -63.0f, 0.05f}},
     };
     return P;
 }
