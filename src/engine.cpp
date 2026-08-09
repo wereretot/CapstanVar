@@ -141,9 +141,12 @@ void TapeEngine::_saturate_oversampled(Frame* buf, int frames, int oversample,
     _os_context.assign(buf + frames - OS_PAD, buf + frames);
     _os_context_valid = true;
 
-    // Saturate at high sample rate
+    // Saturate at high sample rate. Pass oversample so MagneticPath can
+    // cook its 4-band LR-4 crossovers at the effective sample rate, keeping
+    // canonical 200 Hz / 1.5 kHz / 6 kHz splits when summed with the OS-
+    // rate data buffer (Phase 3).
     int sat_n = pad_out + up_n;
-    magnetic.saturate_only(up.data(), sat_n, p);
+    magnetic.saturate_only(up.data(), sat_n, p, oversample);
 
     // Downsample (averaging decimation)
     for (int i = 0; i < frames; ++i) {

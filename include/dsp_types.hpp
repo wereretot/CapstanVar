@@ -310,6 +310,23 @@ inline void butter_lp(float fc_norm, Biquad& bq) {
     bq.a[2] = (1.0f - M_SQRT2 * w + w2) * n;
 }
 
+// ── Butterworth highpass (2-pole) coefficient calculation ─────────────────────
+// Used together with butter_lp to build Linkwitz-Riley 4th-order (LR-4)
+// crossovers — cascade two 2-pole Butterworths of the same family for an
+// in-phase power-complementary split. See MagneticPath::_saturate_bandwise.
+inline void butter_hp(float fc_norm, Biquad& bq) {
+    fc_norm = std::clamp(fc_norm, 1e-4f, 0.4999f);
+    float w  = std::tan(PI * fc_norm);
+    float w2 = w * w;
+    float n  = 1.0f / (1.0f + M_SQRT2 * w + w2);
+    bq.b[0] = n;
+    bq.b[1] = -2.0f * n;
+    bq.b[2] = n;
+    bq.a[0] = 1.0f;
+    bq.a[1] = 2.0f * (w2 - 1.0f) * n;
+    bq.a[2] = (1.0f - M_SQRT2 * w + w2) * n;
+}
+
 // ── Butterworth bandpass coefficient calculation ───────────────────────────────
 inline void butter_bp(float low_norm, float high_norm, Biquad& bq) {
     low_norm  = std::clamp(low_norm,  1e-4f, 0.4998f);
@@ -428,3 +445,89 @@ inline float fast_tanh(float x) {
 
 inline float lerp(float a, float b, float t) { return a + (b-a)*t; }
 inline float clamp01(float x) { return x < 0.f ? 0.f : x > 1.f ? 1.f : x; }
+
+// ── Preisach hysteresis LUT (Phase 3 magnetic saturation) ────────────────────
+// Memory-resident 64×64 lookup table that produces a magnetisation value
+// M_out from the current field H_in and the previous sample's magnetisation
+// M_prev. Bilinear interpolation between the 4 nearest table cells. Each
+// oxide gets its own table — shape varies by coercivity (Hc).
+//
+// The simplified form kept here is macroscopic: it doesn't track turning
+// points (a true Preisach integral over α−β densities would), but blends
+// toward the anhysteretic backbone tanh(H) with a coercive weighting
+// `1 - exp(-|H - inv_tanh(M_prev)| / width)` — audibly correct for tape's
+// "thickening" tail without the rigour of the full double integral. See
+// docs/TAPE_PHYSICS_REFACTOR.md §3 for design rationale.
+//
+// Bilinear interpolation; small enough to stay L1-resident (16 KB per oxide).
+// Placed at end of file so it can reference fast_tanh defined immediately
+// above. Pricing uses oxide_presets() (also defined earlier in this header).
+struct PreisachLUT {
+    static constexpr int   SIZE  = 64;     // 64×64 = 4096 floats = 16 KB
+    static constexpr float H_MAX = 3.0f;   // input field range (matches fast_tanh clip)
+    static constexpr float M_MAX = 1.0f;   // magnetisation range (saturation limits)
+
+    float table[SIZE][SIZE];              // M_out indexed by [H_idx][M_idx]
+
+    // Bilinear lookup. Caller passes H, M_prev in roughly [-H_MAX, +H_MAX]
+    // and [-M_MAX, +M_MAX]; values outside are clamped to the boundary.
+    float lookup(float H, float M_prev) const {
+        float ft = std::clamp((H + H_MAX) / (2.0f * H_MAX), 0.0f, 1.0f);
+        float mt = std::clamp((M_prev + M_MAX) / (2.0f * M_MAX), 0.0f, 1.0f);
+        int   fi = (int)(ft * (SIZE - 1));
+        int   mi = (int)(mt * (SIZE - 1));
+        int   fi1 = std::min(fi + 1, SIZE - 1);
+        int   mi1 = std::min(mi + 1, SIZE - 1);
+        float fa  = ft * (SIZE - 1) - fi;
+        float ma  = mt * (SIZE - 1) - mi;
+        float v00 = table[fi ][mi ];
+        float v01 = table[fi ][mi1];
+        float v10 = table[fi1][mi ];
+        float v11 = table[fi1][mi1];
+        return (v00 * (1.0f - ma) + v01 * ma) * (1.0f - fa)
+             + (v10 * (1.0f - ma) + v11 * ma) *      fa;
+    }
+};
+
+// Build a Preisach LUT for the given oxide. The coercive width derives from
+// HC_REF / oxide.Hc — higher coercivity → narrower loop → sharper switching.
+// The anhysteretic backbone is fast_tanh(H); the hysteretic displacement grows
+// with the distance from H-in to the field that would have produced the
+// previous magnetisation through the anhysteretic curve.
+inline PreisachLUT precompute_preisach_lut(const OxideProps& oxide) {
+    PreisachLUT lut{};
+    float width = std::clamp(HC_REF / std::max(oxide.Hc, 1.0f), 0.3f, 2.0f);
+    for (int hi = 0; hi < PreisachLUT::SIZE; ++hi) {
+        float h_norm = (float)hi / (PreisachLUT::SIZE - 1) * 2.0f * PreisachLUT::H_MAX
+                      - PreisachLUT::H_MAX;
+        float m_anh  = fast_tanh(h_norm);                            // anhysteretic backbone
+        for (int mi = 0; mi < PreisachLUT::SIZE; ++mi) {
+            float m_p    = (float)mi / (PreisachLUT::SIZE - 1) * 2.0f * PreisachLUT::M_MAX
+                         - PreisachLUT::M_MAX;
+            float m_p_cl = std::clamp(m_p, -0.9999f, 0.9999f);
+            float inv_an = std::atanh(m_p_cl);                       // field that would give m_p through anhyst
+            float dist   = std::abs(h_norm - inv_an);
+            float w      = 1.0f - std::exp(-dist / (width + 1e-3f));
+            // M_out: previous magnetisation + (anhysteretic - previous) * coercive weight
+            lut.table[hi][mi] = m_p + (m_anh - m_p) * w;
+        }
+    }
+    return lut;
+}
+
+// Lazy-built registry of Preisach LUTs, one per oxide key. Same shape as
+// oxide_presets(): keyed by the same string, populated on first call.
+// Total footprint on 10 oxides: 160 KB; each lookup table is L1-resident
+// during sustained use thanks to the running MagneticPath keeping only the
+// currently-selected oxide's table hot.
+inline const std::unordered_map<std::string, PreisachLUT>& preisach_luts() {
+    static const std::unordered_map<std::string, PreisachLUT> P = []() {
+        std::unordered_map<std::string, PreisachLUT> M;
+        M.reserve(oxide_presets().size());
+        for (const auto& kv : oxide_presets()) {
+            M.emplace(kv.first, precompute_preisach_lut(kv.second));
+        }
+        return M;
+    }();
+    return P;
+}
