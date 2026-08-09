@@ -445,6 +445,9 @@ void CapstanApp::_draw_frame() {
         ep.mains_hum=_display_params.mains_hum; ep.cutoff_base=_display_params.cutoff_base;
         ep.head_bump=_display_params.head_bump; ep.azimuth_drift=_display_params.azimuth_drift;
         ep.sticky_shed=_display_params.sticky_shed; ep.oxide_type=_display_params.oxide_type;
+        ep.eq_curve=_display_params.eq_curve; ep.lf_trim_db=_display_params.lf_trim_db;
+        ep.hf_trim_db=_display_params.hf_trim_db; ep.format_id=_display_params.format_id;
+        ep.format_locked=_display_params.format_locked;
     }
 
     // ── Tabs — fixed height that leaves exactly TRANSPORT_H + margins at bottom
@@ -790,10 +793,105 @@ void CapstanApp::_draw_magnetic_tab() {
 }
 void CapstanApp::_draw_electronics_tab() {
     ImGui::BeginChild("##es",{0,0},false); bool c=false;
+
+    // ── FORMAT (Phase 2) ──────────────────────────────────────────────────────────
+    // Picking a canonical format snaps ips, EQ curve, oxide, and bias to its
+    // MRL-derived defaults and locks those fields (format_locked = true).
+    // Touching any of the coupled knobs detaches (sets format_locked = false)
+    // and the label flips to 'Custom'.
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::purple);
+    ImGui::TextUnformatted("FORMAT");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    ImGui::Text("Tape Format:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(300);
+    const char* fmt_preview = "── Custom (no coupling) ──";
+    if (!_ui_params.format_id.empty()) {
+        if (auto* f = tape_format_by_id(_ui_params.format_id)) fmt_preview = f->display_name.c_str();
+    }
+    if (ImGui::BeginCombo("##format_id", fmt_preview)) {
+        if (ImGui::Selectable("── Custom (no coupling) ──", _ui_params.format_id.empty())) {
+            _ui_params.format_id = "";
+            _ui_params.format_locked = false;
+            c = true;
+        }
+        for (auto& tf : tape_formats()) {
+            bool sel = (_ui_params.format_id == tf.id);
+            if (ImGui::Selectable(tf.display_name.c_str(), sel)) {
+                _ui_params.format_id     = tf.id;
+                _ui_params.format_locked = true;
+                _ui_params.ips_base      = tf.ips;
+                _ui_params.eq_curve      = tf.eq_curve;
+                _ui_params.oxide_type    = tf.oxide;
+                _ui_params.bias          = tf.bias_recommend;
+                c = true;
+            }
+            if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    if (_ui_params.format_locked) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::cyan);
+        ImGui::TextUnformatted("  [locked: eq + oxide + ips + bias coupled]");
+        ImGui::PopStyleColor();
+    } else if (!_ui_params.format_id.empty()) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::orange);
+        ImGui::TextUnformatted("  [overridden — Custom]");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
+
+    // ── EQ CURVE ─────────────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::purple);
+    ImGui::TextUnformatted("EQUALISATION");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    ImGui::Text("EQ Curve:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::BeginCombo("##eq_curve", eq_curve_name(_ui_params.eq_curve))) {
+        for (int i = 0; i <= (int)EQCurve::AES_30; ++i) {
+            auto curve = (EQCurve)i;
+            bool selected = (_ui_params.eq_curve == curve);
+            if (ImGui::Selectable(eq_curve_name(curve), selected)) {
+                _ui_params.eq_curve = curve;
+                if (!_ui_params.format_id.empty())
+                    _ui_params.format_locked = false;
+                c = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    // When Eq is Legacy: show the cutoff_base LP slider (audible unchanged path).
+    // When Eq is non-Legacy: show LF / HF trim sliders that add on top of the
+    // implicit ±3 dB shelf gains baked into the RBJ curve.
+    if (_ui_params.eq_curve == EQCurve::Legacy) {
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+        ImGui::TextUnformatted("(Legacy single-LP path — cutoff_base drives bandwidth)");
+        ImGui::PopStyleColor();
+        c|=_aslider("cut",  "AZIMUTH CUTOFF (Hz)",      _ui_params.cutoff_base, 500.f,22000.f,Col::purple,"Head gap bandwidth. Legacy single LP path.");
+    } else {
+        EQSpec spec = eq_spec(_ui_params.eq_curve);
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+        ImGui::Text("Standard: %.0f Hz LF shelf, %.2f kHz HF shelf",
+                    1.f / (TWO_PI * spec.lf_tau_s),
+                    1.f / (TWO_PI * spec.hf_tau_s) * 1e-3f);
+        ImGui::PopStyleColor();
+        c|=_aslider("lftrim","LF TRIM (dB)",            _ui_params.lf_trim_db, -6.f, 6.f, Col::purple,
+                    "Additional LF shelf gain on top of the standard curve's LF shelf gain.");
+        c|=_aslider("hftrim","HF TRIM (dB)",            _ui_params.hf_trim_db, -6.f, 6.f, Col::purple,
+                    "Additional HF shelf gain on top of the standard curve's HF shelf gain.");
+    }
+    ImGui::Spacing();
+
     c|=_aslider("hiss",   "NOISE FLOOR",               _ui_params.hiss,          0.f,  0.02f,  Col::purple,"Broadband white noise from preamp/oxide.");
     c|=_aslider("hcol",   "HISS COLOUR (PINK TILT)",   _ui_params.hiss_color,    0.f,  1.f,    Col::purple,"1/f noise colouring from preamp transistors.");
     c|=_aslider("hum",    "60Hz MAINS HUM",            _ui_params.mains_hum,     0.f,  0.05f,  Col::purple,"AC supply at 60/120/180/240 Hz.");
-    c|=_aslider("cut",    "AZIMUTH CUTOFF (Hz)",       _ui_params.cutoff_base,   500.f,22000.f,Col::purple,"Head gap bandwidth.");
     c|=_aslider("bump",   "HEAD BUMP (LF EQ)",         _ui_params.head_bump,     0.f,  5.f,    Col::purple,"Head resonance boosting 50-200 Hz.");
     c|=_aslider("azdrift","AZIMUTH PHASE DRIFT",       _ui_params.azimuth_drift, 0.f,  1.f,    Col::purple,"Head angle error: HF phase diff between channels.");
     c|=_aslider("sticky", "STICKY SHED INTENSITY",     _ui_params.sticky_shed,   0.f,  1.f,    Col::purple,"Binder absorption: squeal, drag, HF loss.");
@@ -1887,6 +1985,12 @@ void CapstanApp::_sync_params() {
     ep.mains_hum=_ui_params.mains_hum; ep.cutoff_base=_ui_params.cutoff_base;
     ep.head_bump=_ui_params.head_bump; ep.azimuth_drift=_ui_params.azimuth_drift;
     ep.sticky_shed=_ui_params.sticky_shed; ep.oxide_type=_ui_params.oxide_type;
+    // Phase 2 — EQ curves + format-id coupling
+    ep.eq_curve      = _ui_params.eq_curve;
+    ep.lf_trim_db    = _ui_params.lf_trim_db;
+    ep.hf_trim_db    = _ui_params.hf_trim_db;
+    ep.format_id     = _ui_params.format_id;
+    ep.format_locked = _ui_params.format_locked;
     // Apply curves on top if playing
     if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load())
         _anim.apply(ep, _engine.play_head);

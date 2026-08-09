@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 static constexpr int   SR          = 44100;
@@ -77,6 +78,24 @@ inline const std::unordered_map<std::string, OxideProps>& oxide_presets() {
 
 static constexpr float HC_REF = 250.0f; // Fe2O3 reference coercivity
 
+// ── EQ playback curves (Phase 2) ──────────────────────────────────────────────
+// EQCurve selects a NAB / IEC / AES / cassette standard playback EQ curve.
+// "Legacy" is the pre-refactor default — uses the existing cutoff_base LP path
+// so all 30+ existing presets behave byte-identically. The non-Legacy curves
+// apply a low-shelf + high-shelf RBJ biquad pair derived from the standards'
+// LF / HF time constants (see docs/TAPE_PHYSICS_REFACTOR.md §5).
+enum class EQCurve : uint8_t {
+    Legacy          = 0,    // Pre-refactor: single Butterworth LP at cutoff_base
+    Cassette_I      = 1,    // 1.875 ips cassette Type I        (3180 + 120 µs)
+    Cassette_II_IV  = 2,    // 1.875 ips cassette Type II / IV  (3180 + 70  µs)
+    NAB_3_75        = 3,    // 3.75  ips NAB                     (3180 + 90  µs)
+    NAB_7_5         = 4,    // 7.5   ips NAB                     (3180 + 50  µs)
+    IEC_7_5         = 5,    // 7.5   ips IEC                     (3180 + 35  µs)
+    NAB_15          = 6,    // 15    ips NAB                     (3180 + 50  µs)
+    IEC_15          = 7,    // 15    ips IEC (mastering std)     (3180 + 35  µs)
+    AES_30          = 8,    // 30    ips AES                     (3180 + 17  µs)
+};
+
 // ── Engine parameters (all controls in one flat struct) ───────────────────────
 struct EngineParams {
     // Input
@@ -119,7 +138,135 @@ struct EngineParams {
     float motor_engage     = 1.0f;
     float tape_speed_mult  = 1.0f;  // actual read stride (1=normal, 40=shuttle, <1=spindown)
     bool presaturated      = false;
+
+    // Phase 2 — EQ playback curves + format-id coupling (Hybrid refactor)
+    EQCurve    eq_curve       = EQCurve::Legacy;  // std playback EQ: Legacy = current LP path
+    float      lf_trim_db     = 0.0f;             // ±6 dB LF trim (applied on top of eq_curve)
+    float      hf_trim_db     = 0.0f;             // ±6 dB HF trim
+    std::string format_id     = "";               // canonical {machine, speed, EQ} key; "" = legacy free-form
+    bool       format_locked  = false;            // when true, picking format snaps values; touching a knob detaches
 };
+
+// ── EQ playback curves (Phase 2) ──────────────────────────────────────────────
+// EQCurve is declared above (before EngineParams, which references it as the
+// default value for its eq_curve field).
+//
+// Time-constant lookup for non-Legacy curves. The LF shelf is always at fc
+// = 1 / (2π · 3180 µs) ≈ 50 Hz for every standard; the HF shelf is at
+// fc = 1 / (2π · τ_hf_us · 1e-6). Implicit shelf gains are lf_gain_db (LF)
+// and hf_gain_db (HF), with user LF/HF trims adding ±6 dB on top.
+struct EQSpec {
+    float hf_tau_s;    // HF shelf time constant in seconds (used in fc = 1/(2π·τ))
+    float lf_tau_s;    // LF shelf time constant (usually 3.180e-3)
+    float lf_gain_db;  // implicit LF shelf gain (representative; standards vary)
+    float hf_gain_db;  // implicit HF shelf gain (typically negative — playback rolls off top)
+};
+inline EQSpec eq_spec(EQCurve c) {
+    static const float T3180 = 3180.0e-6f;
+    switch (c) {
+    case EQCurve::Cassette_I:     return EQSpec{ 120.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::Cassette_II_IV: return EQSpec{  70.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::NAB_3_75:       return EQSpec{  90.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::NAB_7_5:        return EQSpec{  50.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::IEC_7_5:        return EQSpec{  35.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::NAB_15:         return EQSpec{  50.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::IEC_15:         return EQSpec{  35.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::AES_30:         return EQSpec{  17.0e-6f, T3180, +3.0f, -3.0f};
+    default:                      return EQSpec{   0.0f,    T3180,  0.0f,  0.0f};  // Legacy
+    }
+}
+
+// ── Tape formats (Phase 2) ────────────────────────────────────────────────────
+// TapeFormat binds the coupled parameters (speed, EQ curve, oxide, fluxivity,
+// recommended bias) for a canonical machine + speed + EQ standard combo.
+// Used by the format dropdown in src/ui.cpp; settings here are derived from
+// manufacturer / MRL reference data.
+struct TapeFormat {
+    std::string id;                // stable key, e.g. "Studer_A820_30_ips_IEC"
+    std::string display_name;      // human label, e.g. "Studer A820 — 30 ips IEC"
+    float       ips;               // canonical speed
+    EQCurve     eq_curve;          // canonical playback EQ
+    std::string oxide;             // canonical oxide ("SM911", "456", ...)
+    float       fluxivity_nWb_m;   // reference record fluxivity
+    float       bias_recommend;    // recommended bias level (multiplier, 1.0 = nominal)
+    float       motor_health;      // canonical pristine motor health (0 = perfect)
+    float       hiss_floor_db;     // canonical hiss floor relative to MOL (e.g. -68 dB)
+};
+
+// Canonical machine + speed + EQ formats. Each is a distinct preset of the
+// coupled parameters; the format readonly dropdown in ui.cpp enumerates these.
+inline const std::vector<TapeFormat>& tape_formats() {
+    static const std::vector<TapeFormat> F = {
+        // Open reel studio
+        {"Studer_A820_30_IEC", "Studer A820 — 30 ips IEC",  30.0f,  EQCurve::IEC_15, "SM911",  250.f, 1.0f, 0.010f, -68.f},
+        {"Studer_A820_30_NAB", "Studer A820 — 30 ips NAB",  30.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.0f, 0.010f, -68.f},
+        {"Studer_A820_15_IEC", "Studer A820 — 15 ips IEC",  15.0f,  EQCurve::IEC_15, "SM911",  250.f, 1.0f, 0.025f, -67.f},
+        {"Studer_A820_15_NAB", "Studer A820 — 15 ips NAB",  15.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.0f, 0.025f, -67.f},
+        {"Ampex_456_30_NAB",    "Ampex 456 — 30 ips NAB",    30.0f,  EQCurve::AES_30, "456",    250.f, 1.0f, 0.020f, -65.f},
+        {"Ampex_456_15_NAB",    "Ampex 456 — 15 ips NAB",    15.0f,  EQCurve::NAB_15, "456",    250.f, 1.0f, 0.040f, -65.f},
+        {"Ampex_456_15_IEC",    "Ampex 456 — 15 ips IEC",    15.0f,  EQCurve::IEC_15, "456",    250.f, 1.0f, 0.040f, -65.f},
+        {"Revox_B77_7_5_NAB",   "Revox B77 — 7.5 ips NAB",   7.5f,   EQCurve::IEC_7_5, "BASF_LH", 200.f, 0.97f, 0.120f, -63.f},
+        {"Revox_B77_3_75_NAB",  "Revox B77 — 3.75 ips NAB",  3.75f,  EQCurve::NAB_3_75, "BASF_LH", 200.f, 0.90f, 0.300f, -63.f},
+        {"Maxell_UD_7_5",       "Maxell UD — 7.5 ips",       7.5f,   EQCurve::IEC_7_5, "Maxell_UD", 200.f, 0.92f, 0.240f, -62.f},
+        // Cassette references
+        {"Cassette_Type_I",     "Cassette — Type I (Fe₂O₃)", 1.875f, EQCurve::Cassette_I,     "Fe2O3", 100.f, 0.85f, 0.500f, -65.f},
+        {"Cassette_Type_II",    "Cassette — Type II (CrO₂)", 1.875f, EQCurve::Cassette_II_IV, "CrO2",  100.f, 1.35f, 0.400f, -68.f},
+        {"Cassette_Type_IV",    "Cassette — Type IV (Metal)",1.875f, EQCurve::Cassette_II_IV, "Metal", 160.f, 1.70f, 0.280f, -70.f},
+    };
+    return F;
+}
+
+// Tape-format lookup by id; returns nullptr if id is "" or unknown.
+inline const TapeFormat* tape_format_by_id(const std::string& id) {
+    if (id.empty()) return nullptr;
+    for (auto& f : tape_formats())
+        if (f.id == id) return &f;
+    return nullptr;
+}
+
+// Maps an EQCurve enum value to a human-readable string used in JSON I/O
+// and as the EQ dropdown preview text.
+inline const char* eq_curve_name(EQCurve c) {
+    switch (c) {
+    case EQCurve::Legacy:         return "Legacy (single LP)";
+    case EQCurve::Cassette_I:     return "Cassette I (3180+120 µs)";
+    case EQCurve::Cassette_II_IV: return "Cassette II/IV (3180+70 µs)";
+    case EQCurve::NAB_3_75:       return "NAB 3.75 ips (3180+90 µs)";
+    case EQCurve::NAB_7_5:        return "NAB 7.5 ips (3180+50 µs)";
+    case EQCurve::IEC_7_5:        return "IEC 7.5 ips (3180+35 µs)";
+    case EQCurve::NAB_15:         return "NAB 15 ips (3180+50 µs)";
+    case EQCurve::IEC_15:         return "IEC 15 ips (3180+35 µs)";
+    case EQCurve::AES_30:         return "AES 30 ips (3180+17 µs)";
+    }
+    return "Legacy (single LP)";
+}
+
+// Inverse of eq_curve_name — parses a JSON eq_curve string back into the
+// enum. Unknown / empty strings default to Legacy for backward compat.
+inline EQCurve eq_curve_from_name(const std::string& s) {
+    if (s.empty()) return EQCurve::Legacy;
+    // Tolerate both short ("Legacy") and long ("Legacy (single LP)") labels
+    // plus the historical "Cassette_I" / "NAB_15" / etc. forms generated by
+    // the canonical eq_curve_name() output above.
+    if (s.find("Legacy")        != std::string::npos) return EQCurve::Legacy;
+    if (s.find("Cassette I")    != std::string::npos ||
+        s.find("Cassette_I")    != std::string::npos) return EQCurve::Cassette_I;
+    if (s.find("Cassette II")   != std::string::npos ||
+        s.find("Cassette_II")   != std::string::npos) return EQCurve::Cassette_II_IV;
+    if (s.find("NAB 3.75")      != std::string::npos ||
+        s.find("NAB_3_75")      != std::string::npos) return EQCurve::NAB_3_75;
+    if (s.find("NAB 7.5")       != std::string::npos ||
+        s.find("NAB_7_5")       != std::string::npos) return EQCurve::NAB_7_5;
+    if (s.find("IEC 7.5")       != std::string::npos ||
+        s.find("IEC_7_5")       != std::string::npos) return EQCurve::IEC_7_5;
+    if (s.find("NAB 15")        != std::string::npos ||
+        s.find("NAB_15")        != std::string::npos) return EQCurve::NAB_15;
+    if (s.find("IEC 15")        != std::string::npos ||
+        s.find("IEC_15")        != std::string::npos) return EQCurve::IEC_15;
+    if (s.find("AES 30")        != std::string::npos ||
+        s.find("AES_30")        != std::string::npos) return EQCurve::AES_30;
+    return EQCurve::Legacy;  // safe default
+}
 
 // ── 2-pole IIR filter state ───────────────────────────────────────────────────
 struct Biquad {
@@ -181,6 +328,57 @@ inline void butter_bp(float low_norm, float high_norm, Biquad& bq) {
     bq.a[0]  = 1.0f;
     bq.a[1]  = 2.0f * (w02 - 1.0f) * n;
     bq.a[2]  = (1.0f - w0/Q + w02) * n;
+}
+
+// ── RBJ shelving-biquad coefficients (Phase 2 standard playback EQ) ──────────
+// Standard R. Bristow-Johnson "cookbook" shelf biquads, used for the
+// NAB/IEC/AES/cassette playback EQ curves in EQCurve. A is the shelf gain
+// (10^(dB/40)); w0 is the shelf corner in radians; Q shapes the overshoot.
+// We canonicalise Q to 0.707 (Butterworth) by default — the standards are
+// first-order, so Q is approximately 1/√2 once the shelf gain is applied.
+//
+// We hand-divide by a0 because the cookbook pre-divided form does not match
+// the dsp_types Biquad layout (which expects a0 == 1 by convention).
+inline void rbj_lowshelf(float fc, float gain_db, float Q, Biquad& bq) {
+    float A     = std::pow(10.0f, gain_db / 40.0f);
+    float w0    = 2.0f * PI * fc / SR_F;
+    float cw0   = std::cos(w0);
+    float sw0   = std::sin(w0);
+    float Qe    = std::max(Q, 0.05f);                 // numeric floor on Q
+    float alpha = sw0 / (2.0f * Qe);
+    float sqrtA = std::sqrt(A);
+
+    float b0 =     A * ((A + 1.0f) - (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha);
+    float b1 =  2.0f * A * ((A - 1.0f) - (A + 1.0f) * cw0);
+    float b2 =     A * ((A + 1.0f) - (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha);
+    float a0 =          (A + 1.0f) + (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha;
+    float a1 =    -2.0f * ((A - 1.0f) + (A + 1.0f) * cw0);
+    float a2 =          (A + 1.0f) + (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha;
+
+    float inv_a0 = 1.0f / a0;
+    bq.b[0] = b0 * inv_a0;  bq.b[1] = b1 * inv_a0;  bq.b[2] = b2 * inv_a0;
+    bq.a[0] = 1.0f;          bq.a[1] = a1 * inv_a0; bq.a[2] = a2 * inv_a0;
+}
+
+inline void rbj_highshelf(float fc, float gain_db, float Q, Biquad& bq) {
+    float A     = std::pow(10.0f, gain_db / 40.0f);
+    float w0    = 2.0f * PI * fc / SR_F;
+    float cw0   = std::cos(w0);
+    float sw0   = std::sin(w0);
+    float Qe    = std::max(Q, 0.05f);
+    float alpha = sw0 / (2.0f * Qe);
+    float sqrtA = std::sqrt(A);
+
+    float b0 =     A * ((A + 1.0f) + (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha);
+    float b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cw0);
+    float b2 =     A * ((A + 1.0f) + (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha);
+    float a0 =          (A + 1.0f) - (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha;
+    float a1 =      2.0f * ((A - 1.0f) - (A + 1.0f) * cw0);
+    float a2 =          (A + 1.0f) - (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha;
+
+    float inv_a0 = 1.0f / a0;
+    bq.b[0] = b0 * inv_a0;  bq.b[1] = b1 * inv_a0;  bq.b[2] = b2 * inv_a0;
+    bq.a[0] = 1.0f;          bq.a[1] = a1 * inv_a0; bq.a[2] = a2 * inv_a0;
 }
 
 // ── Highpass (1-pole DC block) ────────────────────────────────────────────────

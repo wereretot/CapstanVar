@@ -18,9 +18,22 @@ private:
     Biquad  _bump_f;
     float   _bump_fc_last = -1.0f;
 
-    // Azimuth lowpass
+    // Azimuth lowpass (legacy — only used when EngineParams::eq_curve == Legacy)
     Biquad  _az_f;
     float   _az_fc_last   = -1.0f;
+
+    // Standard playback EQ shelves (Phase 2). Only used when eq_curve is one
+    // of the non-Legacy values (NAB / IEC / AES / cassette). Each shelf is
+    // re-cooked when fc or gain moves by more than ~0.5 Hz / 0.05 dB,
+    // mirroring the existing biquad state-cook guards.
+    Biquad  _eq_lf;                      // 50 Hz low-shelf (always 3180 µs LF tau)
+    float   _eq_lf_fc_last = -1.0f;
+    float   _eq_lf_db_last = -999.0f;
+    Biquad  _eq_hf;                      // high-shelf at fc = 1/(2π·τ_hf)
+    float   _eq_hf_fc_last = -1.0f;
+    float   _eq_hf_db_last = -999.0f;
+    EQCurve _eq_curve_last = EQCurve::Legacy;
+    bool    _eq_in_use     = false;      // tracks whether standard EQ path was last taken
 
     // Azimuth phase delay buffer (128 samples headroom)
     static constexpr int AZ_BUF = 128;

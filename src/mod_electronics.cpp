@@ -70,19 +70,56 @@ void ElectronicComponents::process(Frame* buf, int n,
         }
     }
 
-    // ── 2. AZIMUTH LOWPASS ────────────────────────────────────────────────────
-    float cutoff     = p.cutoff_base;
-    float shed_factor = std::clamp(1.0f - sticky_drag * 50.0f, 0.05f, 1.0f);
-    float safe_cut   = std::clamp(cutoff * speed_factor * shed_factor, 80.0f, 20000.0f);
-    float fc_norm    = std::clamp(safe_cut / (SR_F * 0.5f), 1e-4f, 0.4999f);
-    // Only recompute coefficients when cutoff changes by >0.5 Hz (inaudible threshold).
-    // Do NOT reset state on update — that causes a click every block.
-    if (std::abs(safe_cut - _az_fc_last) > 0.5f) {
-        butter_lp(fc_norm, _az_f);
-        // No reset: preserve state, accept brief coefficient-update transient
-        _az_fc_last = safe_cut;
+    // ── 2. PLAYBACK EQ (Phase 2) ────────────────────────────────────────────────────
+    // Two paths:
+    //   (a) Legacy: single Butterworth LP at cutoff_base — audibly identical to
+    //       pre-refactor behaviour for any preset whose eq_curve is left at
+    //       the default value (EQCurve::Legacy). All 30+ existing built-in
+    //       presets take this path so audibility is preserved across Phase 2.
+    //   (b) Standard curves: low-shelf + high-shelf RBJ biquad pair at the
+    //       EQCurve's LF/HF time constants, with implicit (±3 dB) shelf gains
+    //       and the user's LF/HF trim (±6 dB) summed on top.
+    if (p.eq_curve == EQCurve::Legacy) {
+        float cutoff     = p.cutoff_base;
+        float shed_factor = std::clamp(1.0f - sticky_drag * 50.0f, 0.05f, 1.0f);
+        float safe_cut   = std::clamp(cutoff * speed_factor * shed_factor, 80.0f, 20000.0f);
+        float fc_norm    = std::clamp(safe_cut / (SR_F * 0.5f), 1e-4f, 0.4999f);
+        // Only recompute coefficients when cutoff changes by >0.5 Hz (inaudible threshold).
+        // Do NOT reset state on update — that causes a click every block.
+        if (std::abs(safe_cut - _az_fc_last) > 0.5f) {
+            butter_lp(fc_norm, _az_f);
+            // No reset: preserve state, accept brief coefficient-update transient
+            _az_fc_last = safe_cut;
+        }
+        _az_f.process(buf, n);
+        _eq_in_use = false;
+    } else {
+        // Standard playback EQ path — RBJ low + high shelves with implicit +
+        // user-trim gain. Cache re-cook only on meaningful param change so we
+        // don't reset IIR state every block.
+        EQSpec spec    = eq_spec(p.eq_curve);
+        float  lf_tau  = std::max(1.0e-6f, spec.lf_tau_s);
+        float  hf_tau  = std::max(1.0e-6f, spec.hf_tau_s);
+        float  lf_fc   = 1.0f / (2.0f * PI * lf_tau);
+        float  hf_fc   = std::min(SR_F * 0.45f, 1.0f / (2.0f * PI * hf_tau));
+        float  lf_db   = std::clamp(spec.lf_gain_db + p.lf_trim_db, -24.0f, +24.0f);
+        float  hf_db   = std::clamp(spec.hf_gain_db + p.hf_trim_db, -24.0f, +24.0f);
+
+        if (std::abs(lf_fc - _eq_lf_fc_last) > 0.5f ||
+            std::abs(lf_db - _eq_lf_db_last) > 0.05f) {
+            rbj_lowshelf(lf_fc, lf_db, 0.707f, _eq_lf);
+            _eq_lf_fc_last = lf_fc;  _eq_lf_db_last = lf_db;
+        }
+        if (std::abs(hf_fc - _eq_hf_fc_last) > 0.5f ||
+            std::abs(hf_db - _eq_hf_db_last) > 0.05f) {
+            rbj_highshelf(hf_fc, hf_db, 0.707f, _eq_hf);
+            _eq_hf_fc_last = hf_fc;  _eq_hf_db_last = hf_db;
+        }
+        _eq_lf.process(buf, n);
+        _eq_hf.process(buf, n);
+        _eq_curve_last = p.eq_curve;
+        _eq_in_use     = true;
     }
-    _az_f.process(buf, n);
 
     // ── 3. AZIMUTH PHASE WANDER ───────────────────────────────────────────────
     // Models head gap angle variation causing HF phase difference between channels.

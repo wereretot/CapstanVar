@@ -9,10 +9,15 @@ using json = nlohmann::json;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static void ep_to_json(json& j, const std::string& name, const EngineParams& e) {
-    j["__version__"] = 1;
-    j["__app__"]     = "CapstanVar";
-    j["__name__"]    = name;
-    j["oxide_type"]  = e.oxide_type;
+    j["__version__"]   = 2;          // Phase 2: extended EQ / format schema
+    j["__app__"]       = "CapstanVar";
+    j["__name__"]      = name;
+    j["oxide_type"]    = e.oxide_type;
+    j["eq_curve"]      = eq_curve_name(e.eq_curve);
+    j["format_id"]     = e.format_id;
+    j["format_locked"] = e.format_locked;
+    j["lf_trim_db"]    = e.lf_trim_db;
+    j["hf_trim_db"]    = e.hf_trim_db;
     #define F(x) j[#x] = e.x
     F(input_gain);
     F(ips_base); F(motor_health); F(motor_drag); F(motor_boost);
@@ -41,7 +46,15 @@ static EngineParams ep_from_json(const json& j) {
     get("mains_hum",e.mains_hum); get("cutoff_base",e.cutoff_base);
     get("head_bump",e.head_bump); get("azimuth_drift",e.azimuth_drift);
     get("sticky_shed",e.sticky_shed);
-    if (j.contains("oxide_type")) e.oxide_type = j["oxide_type"].get<std::string>();
+    if (j.contains("oxide_type"))    e.oxide_type   = j["oxide_type"].get<std::string>();
+    if (j.contains("format_id"))     e.format_id    = j["format_id"].get<std::string>();
+    if (j.contains("format_locked")) e.format_locked = j["format_locked"].get<bool>();
+    if (j.contains("lf_trim_db"))    e.lf_trim_db   = j["lf_trim_db"].get<float>();
+    if (j.contains("hf_trim_db"))    e.hf_trim_db   = j["hf_trim_db"].get<float>();
+    if (j.contains("eq_curve"))
+        e.eq_curve = eq_curve_from_name(j["eq_curve"].get<std::string>());
+    // eq_curve defaults to Legacy if missing (Phase 1 / pre-Phase-2 files
+    // load unchanged audibly because the LP path is preserved).
     return e;
 }
 
