@@ -151,9 +151,9 @@ they will be ignored on load.
 
 ## Phase 5 storage presets (4 built-in)
 
-Four bundled storage environments ship with Phase 5 inside
-`src/preset_manager.cpp`. They are `.cvpr` files like any other
-preset, but they only set the two runtime env knobs (temperature,
+Four bundled storage environments ship with Phase 5c as actual
+built-in entries inside `src/preset_manager.cpp::_build_builtins()`.
+They are `.cvpr` files like any other preset, but they only set the two runtime env knobs (temperature,
 humidity) — `env_age_acceleration`, `env_age_seconds`,
 `env_tape_health`, and `env_failure_modes` stay at their defaults
 and are user-driven from the Environment tab.

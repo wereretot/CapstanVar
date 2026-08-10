@@ -190,6 +190,24 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
 
     EngineParams p = params;
     p.is_reversed  = is_reversed;
+
+    // Phase 5b — EnvironmentModule sits at the top of the chain. It
+    // accumulates env_age_seconds / recomputes env_tape_health /
+    // applies the per-field damage floors + thermal offsets +
+    // multiplicative bias drift, then overwrites `p` in place so the
+    // downstream modules (transport / magnetic / electronics) see the
+    // effective values without their signatures changing. After the
+    // call the two PERSISTED fields (env_age_seconds, env_tape_health)
+    // are written back to engine.params under the same lock so the
+    // GUI's wear progress bar reflects the freshly-accumulated wear
+    // on the next render frame. env_failure_modes is NOT written back
+    // here because process() passes it through verbatim — the GUI's
+    // TRIGGER BREAK path owns that field. See
+    // docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 wiring".
+    p = env.process(p, frames);
+    params.env_age_seconds = p.env_age_seconds;
+    params.env_tape_health = p.env_tape_health;
+
     // When tape is moving, keep engage target = 1.0 so TransportDynamics
     // internal ramp reaches full speed quickly. tape_speed_mult carries
     // the actual inertia — no double-ramping.

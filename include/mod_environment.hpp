@@ -123,4 +123,28 @@ public:
     // capture (some pipelines only capture stderr; mixing stdout for
     // PASS loses the signal).
     static bool verify_reference_invariant(float eps = 1e-5f);
+
+    // Phase 5b — non-reference audited worked example for Hot Attic
+    // storage profile at α=10000. Validates that the env module's
+    // aging math follows the documented formulas exactly at an
+    // aggressive non-reference operating point:
+    //   T_c=35 °C,  RH_pct=70 %,  α=10000,  BLOCK_SIZE frames @ SR.
+    // Expected per-block numerics (derived in docs §X "Phase 5 worked
+    // example"):
+    //   dt_block     = BLOCK_SIZE / SR               ~ 0.02322 s
+    //   temp_rate    = 2^((35-20)/10)                ~ 2.828427
+    //   hum_rate     = (70-50)/50 + 0^2               = 0.4
+    //   accum_now    = dt_block × α × temp × hum    ~ 262.7    s
+    //   age_years    = accum_now / kSecondsPerYear  ~ 8.32e-6  yr
+    //   tape_health  = exp(-age_years / 10)         ~ 0.999999167
+    //   bias factor  = max(0.5, 1 - (35-20)*0.005)  = 0.925
+    //   wow / flutter = base.x + |35-20| × 0.05   (base + 0.75)
+    //   tension_load = base + ((max(0, 35-20)/100))² (base + 0.0225)
+    // Assertions: env_age_seconds ≈ 262.7, env_tape_health ≈
+    // 0.999999167, eff.bias < base.bias, eff.hiss >= base.hiss
+    // (monotone), and the four IMMUNE fields (eq_curve, format_id,
+    // oxide_type, input_gain) + env_failure_modes passthrough
+    // exactly. False on first divergence; diagnostic prints every
+    // divergent field on FAIL.
+    static bool verify_hot_attic_worked_example();
 };

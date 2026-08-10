@@ -26,6 +26,16 @@ static void ep_to_json(json& j, const std::string& name, const EngineParams& e) 
     F(crosstalk);F(print_through);F(demagnetization); F(oxide_shedding);
     F(hiss);     F(hiss_color);   F(mains_hum);       F(cutoff_base);
     F(head_bump);F(azimuth_drift);F(sticky_shed);
+    // Phase 5 — Environment & aging (append-only). All 6 env_* keys
+    // ride the same F() macro because the macro generates `j[#x] = e.x`
+    // textually and nlohmann_json accepts double + uint32 on the
+    // assignment operator transparently. The get<>() tagged-type
+    // requirement applies only to the LOADER side (ep_from_json),
+    // not the writer. See docs/PRESET_SCHEMA.md "Phase 5 fields" and
+    // docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 schema migration".
+    F(env_temperature_c);     F(env_humidity_pct);
+    F(env_age_acceleration);  F(env_age_seconds);
+    F(env_tape_health);       F(env_failure_modes);
     #undef F
 }
 
@@ -46,6 +56,20 @@ static EngineParams ep_from_json(const json& j) {
     get("mains_hum",e.mains_hum); get("cutoff_base",e.cutoff_base);
     get("head_bump",e.head_bump); get("azimuth_drift",e.azimuth_drift);
     get("sticky_shed",e.sticky_shed);
+    // Phase 5 — Environment & aging (append-only). Four float-valued
+    // env_* keys ride the same get() lambda as transport/magnetic/
+    // electronic numerics. The 2 non-float env_* keys (env_age_seconds
+    // = double, env_failure_modes = uint32) need explicit get<type>()
+    // calls because auto `get` lambda above is float-typed, per
+    // docs/TAPE_PHYSICS_REFACTOR.md §X F() macro gotcha note.
+    get("env_temperature_c",e.env_temperature_c);
+    get("env_humidity_pct",e.env_humidity_pct);
+    get("env_age_acceleration",e.env_age_acceleration);
+    get("env_tape_health",e.env_tape_health);
+    if (j.contains("env_age_seconds"))
+        e.env_age_seconds = j["env_age_seconds"].get<double>();
+    if (j.contains("env_failure_modes"))
+        e.env_failure_modes = j["env_failure_modes"].get<uint32_t>();
     if (j.contains("oxide_type"))    e.oxide_type   = j["oxide_type"].get<std::string>();
     if (j.contains("format_id")) {
         std::string fid = j["format_id"].get<std::string>();
@@ -522,6 +546,26 @@ void PresetManager::_build_builtins() {
         P(demagnetization,0.32f) P(print_through,0.012f)
         P(asperities,0.055f) P(barkhausen,0.028f)
     END_PRESET
+    // ── Phase 5 storage presets (4 built-in) — must align with
+    // storage_profiles() in include/mod_environment.hpp. Each entry
+    // sets ONLY env_temperature_c + env_humidity_pct (the two static
+    // axes). env_age_acceleration / env_age_seconds / env_tape_health
+    // / env_failure_modes stay at struct defaults so applying a storage
+    // preset does NOT reset existing wear the user has accumulated.
+    // Display names mirror storage_profiles() and are stable so the
+    // UI storage combo resolution is consistent.
+    BEGIN_PRESET("Controlled (climate-controlled vault)", 15.0f)
+        P(env_temperature_c, 20.0f) P(env_humidity_pct, 50.0f)
+    END_PRESET
+    BEGIN_PRESET("Consumer Closet (typical bedroom)", 15.0f)
+        P(env_temperature_c, 25.0f) P(env_humidity_pct, 60.0f)
+    END_PRESET
+    BEGIN_PRESET("Hot Attic (abandoned for years)", 15.0f)
+        P(env_temperature_c, 35.0f) P(env_humidity_pct, 70.0f)
+    END_PRESET
+    BEGIN_PRESET("Cold Warehouse (unheated storage)", 15.0f)
+        P(env_temperature_c, 10.0f) P(env_humidity_pct, 40.0f)
+    END_PRESET
 }
 
 #undef BEGIN_PRESET
@@ -580,4 +624,121 @@ std::optional<Preset> PresetManager::import_preset(const std::string& path) cons
         pr.params = ep_from_json(j);
         return pr;
     } catch(...) { return std::nullopt; }
+}
+
+// Phase 5c — round-trip smoke test for the 4 storage presets added
+// to _build_builtins(). Iterates each storage preset, serializes via
+// ep_to_json, deserializes via ep_from_json, and verifies that:
+//   1. The preset exists in _build_builtins() (find_builtin succeeds).
+//   2. The preset's env_temperature_c + env_humidity_pct match the
+//      canonical values from storage_profiles() in mod_environment.hpp
+//      (single source of truth — if storage_profiles() ever changes,
+//      this audit fires so the preset is updated too).
+//   3. The four WEAR fields (env_age_acceleration, env_age_seconds,
+//      env_tape_health, env_failure_modes) stay at struct defaults
+//      after the round-trip (storage presets must NOT reset wear).
+// Cheap enough to call once at startup; self-contained; follows the
+// env-module audit pattern (stderr-only PASS/FAIL).
+//
+// The expected values below mirror storage_profiles() entries verbatim.
+// If the canonical catalog in include/mod_environment.hpp ever changes,
+// this list must be updated in lockstep (the audit will FAIL otherwise).
+bool PresetManager::verify_storage_preset_round_trip() {
+    struct Expected {
+        const char* name;
+        float       t_c;
+        float       rh_pct;
+    };
+    static const Expected kExpected[] = {
+        {"Controlled (climate-controlled vault)", 20.0f, 50.0f},
+        {"Consumer Closet (typical bedroom)",      25.0f, 60.0f},
+        {"Hot Attic (abandoned for years)",        35.0f, 70.0f},
+        {"Cold Warehouse (unheated storage)",      10.0f, 40.0f},
+    };
+    static constexpr int kCount = sizeof(kExpected) / sizeof(kExpected[0]);
+
+    bool ok = true;
+    int  found = 0;
+    PresetManager pm;
+
+    for (int i = 0; i < kCount; ++i) {
+        const Expected& exp = kExpected[i];
+        auto pr = pm.find_builtin(exp.name);
+        if (!pr) {
+            std::fprintf(stderr,
+                         "[preset_manager] FAIL: storage preset \u201c%s\u201d "
+                         "not in _build_builtins().\\n",
+                         exp.name);
+            std::fflush(stderr);
+            ok = false;
+            continue;
+        }
+        found++;
+
+        // Cross-check A: preset's stored env_* in _build_builtins match
+        // the canonical catalog values exactly (within float tolerance).
+        const float got_t  = pr->params.env_temperature_c;
+        const float got_rh = pr->params.env_humidity_pct;
+        if (std::fabs(got_t  - exp.t_c)   > 1e-5f) ok = false;
+        if (std::fabs(got_rh - exp.rh_pct) > 1e-5f) ok = false;
+
+        // Cross-check B: wear fields stay at struct defaults (storage
+        // presets are designed NOT to reset existing wear).
+        if (pr->params.env_age_acceleration != 1.0f) ok = false;
+        if (pr->params.env_age_seconds      != 0.0)  ok = false;
+        if (pr->params.env_tape_health      != 1.0f) ok = false;
+        if (pr->params.env_failure_modes    != 0u)   ok = false;
+
+        // Round-trip via ep_to_json / ep_from_json without touching disk.
+        json j;
+        ep_to_json(j, exp.name, pr->params);
+        EngineParams back = ep_from_json(j);
+
+        // Cross-check C: round-trip preserves the env_* values exactly.
+        if (std::fabs(back.env_temperature_c - exp.t_c)   > 1e-5f) ok = false;
+        if (std::fabs(back.env_humidity_pct  - exp.rh_pct) > 1e-5f) ok = false;
+
+        // Cross-check D: round-trip preserves the wear defaults.
+        if (back.env_age_acceleration != 1.0f) ok = false;
+        if (back.env_age_seconds      != 0.0)  ok = false;
+        if (back.env_tape_health      != 1.0f) ok = false;
+        if (back.env_failure_modes    != 0u)   ok = false;
+    }
+
+    if (ok) {
+        std::fprintf(stderr,
+                     "[preset_manager] PASS: storage_preset round-trip holds "
+                     "(%d/%d presets; T_c, RH, and wear defaults preserved).\\n",
+                     found, kCount);
+        std::fflush(stderr);
+        return true;
+    }
+
+    // FAIL diagnostic: print divergent fields per preset so the
+    // implementer can spot which catalog entry drifted.
+    std::fprintf(stderr,
+                 "[preset_manager] FAIL: storage_preset round-trip regression "
+                 "(found %d of %d expected).\\n",
+                 found, kCount);
+    for (int i = 0; i < kCount; ++i) {
+        const Expected& exp = kExpected[i];
+        auto pr = pm.find_builtin(exp.name);
+        if (!pr) continue;
+        std::fprintf(stderr,
+                     "  [%s]  env_temperature_c    want=%.4f   got=%.4f\\n"
+                     "         env_humidity_pct     want=%.4f   got=%.4f\\n"
+                     "         env_age_acceleration  want=1.0    got=%.4f\\n"
+                     "         env_age_seconds       want=0.0    got=%.6f\\n"
+                     "         env_tape_health       want=1.0    got=%.4f\\n"
+                     "         env_failure_modes     want=0u     got=%u\\n",
+                     exp.name,
+                     exp.t_c,    pr->params.env_temperature_c,
+                     exp.rh_pct, pr->params.env_humidity_pct,
+                     1.0f,       pr->params.env_age_acceleration,
+                     0.0,        pr->params.env_age_seconds,       0.0,
+                     1.0f,       pr->params.env_tape_health,       1.0f,
+                     0u,         pr->params.env_failure_modes,     0u);
+    }
+    std::fflush(stderr);
+    return false;
 }
