@@ -2054,9 +2054,7 @@ void CapstanApp::_apply_preset(const EngineParams& p, const std::string& name) {
     // storage presets do not reset wear.
     EngineParams p_in = p;
     p_in.env_age_seconds = std::max(p_in.env_age_seconds, _ui_params.env_age_seconds);
-    p_in.env_tape_health = (p_in.env_tape_health <= 0.0f)
-                           ? _ui_params.env_tape_health
-                           : std::min(p_in.env_tape_health, _ui_params.env_tape_health);
+    p_in.env_tape_health = std::min(p_in.env_tape_health, _ui_params.env_tape_health);
     _ui_params = p_in;
     // Phase 4 fix: validate format_id at every EngineParams arrival path.
     // ep_from_json() guards the JSON-import path; this catches project-load
