@@ -41,6 +41,46 @@ inline constexpr float kEnvHalfLifeYears = 10.0f;
 inline constexpr double kSecondsPerYear = 365.25 * 86400.0;
 } // namespace env_constants
 
+// Phase 5 — Storage-profile catalog. Single source of truth for the
+// four built-in storage environments surfaced in src/ui.cpp's
+// Environment tab. Each profile pins only the static environment axes
+// (temperature / humidity); env_age_acceleration stays user-driven and
+// the persisted wear fields (env_age_seconds, env_tape_health,
+// env_failure_modes) are NOT reset by the storage-preset selection —
+// see docs/PRESET_SCHEMA.md "Phase 5 storage presets" rationale.
+//
+// Phase 5c mirrors these as `.cvpr` files via PresetManager. The UI
+// reads storage_profiles() directly so the tab works before Phase 5c
+// lands (and so the static data here stays the audit source).
+struct StorageProfile {
+    const char* id;                 // stable key (e.g. "HotAttic")
+    const char* display_name;       // human-readable label
+    float       env_temperature_c;  // °C,  [0..60]
+    float       env_humidity_pct;   // RH%, [0..100]
+    const char* description;        // tooltip text in the Environment tab
+};
+inline const std::vector<StorageProfile>& storage_profiles() {
+    static const std::vector<StorageProfile> P = {
+        {"Controlled",
+         "Controlled (climate-controlled vault)",
+         20.0f, 50.0f,
+         "20 °C / 50% RH \u2014 reference state; env module produces zero damage."},
+        {"ConsumerCloset",
+         "Consumer Closet (typical bedroom)",
+         25.0f, 60.0f,
+         "25 °C / 60% RH \u2014 mild; hiss climbs after ~3 sim-years, dropout creeps after ~5."},
+        {"HotAttic",
+         "Hot Attic (abandoned for years)",
+         35.0f, 70.0f,
+         "35 °C / 70% RH \u2014 aggressive; sticky shed audible within ~1 sim-year; mould risk."},
+        {"ColdWarehouse",
+         "Cold Warehouse (unheated storage)",
+         10.0f, 40.0f,
+         "10 °C / 40% RH \u2014 below reference; ageing axis dormant, only thermal wow/flutter drift."},
+    };
+    return P;
+}
+
 class EnvironmentModule {
 public:
     EnvironmentModule() = default;

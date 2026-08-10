@@ -11,6 +11,7 @@ namespace fs = std::filesystem;
 #include <algorithm>
 #include <string>
 #include "key_bindings.hpp"
+#include "mod_environment.hpp"   // Phase 5 — storage_profiles(), env_constants::*
 
 #ifdef NAGRA_HAS_TFD
 #include <tinyfiledialogs.h>
@@ -448,6 +449,14 @@ void CapstanApp::_draw_frame() {
         ep.eq_curve=_display_params.eq_curve; ep.lf_trim_db=_display_params.lf_trim_db;
         ep.hf_trim_db=_display_params.hf_trim_db; ep.format_id=_display_params.format_id;
         ep.format_locked=_display_params.format_locked;
+        // Phase 5 — Environment & aging (mirrors _sync_params below; the
+        // audio thread reads env_* via TapeEngine::dsp_process in a follow-up).
+        ep.env_temperature_c     = _display_params.env_temperature_c;
+        ep.env_humidity_pct      = _display_params.env_humidity_pct;
+        ep.env_age_acceleration  = _display_params.env_age_acceleration;
+        ep.env_age_seconds       = _display_params.env_age_seconds;
+        ep.env_tape_health       = _display_params.env_tape_health;
+        ep.env_failure_modes     = _display_params.env_failure_modes;
     }
 
     // ── Tabs — fixed height that leaves exactly TRANSPORT_H + margins at bottom
@@ -752,6 +761,7 @@ void CapstanApp::_draw_tabs() {
     if (ImGui::BeginTabItem("  Transport Mechanics  ")) { _draw_transport_tab(); ImGui::EndTabItem(); }
     if (ImGui::BeginTabItem("  Magnetic Flux  "))       { _draw_magnetic_tab();  ImGui::EndTabItem(); }
     if (ImGui::BeginTabItem("  Electronics & Wear  "))  { _draw_electronics_tab(); ImGui::EndTabItem(); }
+    if (ImGui::BeginTabItem("  Environment  "))         { _draw_environment_tab(); ImGui::EndTabItem(); }
     ImGui::EndTabBar();
 }
 
@@ -1991,6 +2001,16 @@ void CapstanApp::_sync_params() {
     ep.hf_trim_db    = _ui_params.hf_trim_db;
     ep.format_id     = _ui_params.format_id;
     ep.format_locked = _ui_params.format_locked;
+    // Phase 5 — Environment & aging (mirrors _draw_frame inline-copy above).
+    // The audio thread will eventually read these via TapeEngine::dsp_process,
+    // but they're synced here so the live UI and the env module's reference
+    // state share the same EngineParams snapshot.
+    ep.env_temperature_c     = _ui_params.env_temperature_c;
+    ep.env_humidity_pct      = _ui_params.env_humidity_pct;
+    ep.env_age_acceleration  = _ui_params.env_age_acceleration;
+    ep.env_age_seconds       = _ui_params.env_age_seconds;
+    ep.env_tape_health       = _ui_params.env_tape_health;
+    ep.env_failure_modes     = _ui_params.env_failure_modes;
     // Apply curves on top if playing
     if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load())
         _anim.apply(ep, _engine.play_head);
@@ -2290,4 +2310,303 @@ void CapstanApp::_toggle_ff() {
         return; 
     }
     _audio.shuttle_ff(10.f);  // Start at 10x
+}
+// ── Environment tab (Phase 5d) ──────────────────────────────────────────────────
+// UI surface for the env module. Mirrors the locked design in
+// docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 failure-mode catalog" +
+// docs/PRESET_SCHEMA.md §"Option (a) instant-override preservation".
+//
+//   - Storage combo at the top \u2014 picks only set (T_c, RH); wear state is
+//     preserved (storage profile change does NOT reset age/health/bit-set).
+//   - Three sliders: temperature, humidity, age acceleration (linear 0.1..\u221e).
+//   - Wear readouts: accumulated age formatted by magnitude; tape-health
+//     bar with green\u2192amber\u2192red gradient (1-px segments).
+//   - Failure modes: 7 checkboxes bound to env_failure_modes bit-set so
+//     a user can pin a specific mode without invoking TRIGGER (option A).
+//   - TRIGGER BREAK walks the catalog top\u2192bottom (MAGNETISATION_LOSS first)
+//     and fires the highest-ranked mode whose preconditions hold. Audit\n     logged to stderr so the trail is greppable from CI / stdout-stderr\n     capture.\n//   - RESET TAPE clears accumulated age, tape health, and failure-mode\n//     bit-set; storage profile / \u03b1 / temperature / humidity are NOT reset.
+void CapstanApp::_draw_environment_tab() {
+    ImGui::BeginChild("##es_env", {0,0}, false);
+    bool c = false;
+
+    // \u2500\u2500 Storage profile (Phase 5c) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::cyan);
+    ImGui::TextUnformatted("STORAGE PROFILE");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    // Active-profile detection: T_c and RH_pct match a profile within
+    // 0.05-tolerance. Auto-detect (no explicit _storage_idx state) so a
+    // hand edit to a slider detaches the combo preview back to "Custom".
+    int active_idx = -1;
+    auto& profs = storage_profiles();
+    for (int i = 0; i < (int)profs.size(); ++i) {
+        if (std::fabs(_ui_params.env_temperature_c - profs[i].env_temperature_c) < 0.05f &&
+            std::fabs(_ui_params.env_humidity_pct    - profs[i].env_humidity_pct)   < 0.05f) {
+            active_idx = i;
+            break;
+        }
+    }
+    const char* preview = (active_idx >= 0) ? profs[active_idx].display_name
+                                            : "\u2500\u2500 Custom \u2500\u2500";
+    ImGui::SetNextItemWidth(360);
+    if (ImGui::BeginCombo("##storage_profile", preview)) {
+        if (ImGui::Selectable("\u2500\u2500 Custom \u2500\u2500", active_idx < 0)) {
+            // Detach: leave T_c / RH untouched. Wear state preserved.
+        }
+        for (int i = 0; i < (int)profs.size(); ++i) {
+            bool sel = (active_idx == i);
+            if (ImGui::Selectable(profs[i].display_name, sel)) {
+                _ui_params.env_temperature_c = profs[i].env_temperature_c;
+                _ui_params.env_humidity_pct   = profs[i].env_humidity_pct;
+                c = true;
+            }
+            if (sel) ImGui::SetItemDefaultFocus();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", profs[i].description);
+        }
+        ImGui::EndCombo();
+    }
+    if (active_idx >= 0) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::cyan);
+        ImGui::TextUnformatted("  [profile active]");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::orange);
+        ImGui::TextUnformatted("  [overridden \u2014 Custom]");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
+
+    // \u2500\u2500 Sliders (Phase 5) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
+    ImGui::TextUnformatted("ENVIRONMENT");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    c |= _aslider("env_t",   "TEMPERATURE (\u00b0C)",           _ui_params.env_temperature_c,    0.f,    60.f,    Col::amber,  "Ambient \u00b0C. Doubles env rate every +10\u00b0C above reference (Arrhenius); below 10\u00b0C slows aging. Reference: 20 \u00b0C.");
+    c |= _aslider("env_rh",  "HUMIDITY (% RH)",                 _ui_params.env_humidity_pct,     0.f,    100.f,   Col::cyan,   "Relative humidity. Linear above 50%, quadratic surcharge above 70%. Below 50% damps the ageing axis. Reference: 50%.");
+    c |= _aslider("env_a",   "AGE ACCELERATION (\u03b1)",        _ui_params.env_age_acceleration, 0.1f,   10000.f, Col::purple, "Wall-clock \u00d7 \u03b1 = sim-age. \u03b1=1 matches real time; \u03b1=1000 reaches audible Hot Attic thresholds in ~23 wall-hours.");
+    ImGui::Spacing();
+
+    // \u2500\u2500 Wear state readouts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::green);
+    ImGui::TextUnformatted("WEAR STATE");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    const double age_s = _ui_params.env_age_seconds;
+    const float  age_y = (float)(age_s / env_constants::kSecondsPerYear);
+    const float  h     = _ui_params.env_tape_health;
+
+    char age_buf[64];
+    if      (age_s <    60.0)  std::snprintf(age_buf, sizeof(age_buf), "%.1f s",                  age_s);
+    else if (age_s <  3600.0)  std::snprintf(age_buf, sizeof(age_buf), "%d m %d s",               (int)(age_s/60), (int)age_s%60);
+    else if (age_s < 86400.0)  std::snprintf(age_buf, sizeof(age_buf), "%.1f hours",              age_s/3600.0);
+    else if (age_s < env_constants::kSecondsPerYear)
+                              std::snprintf(age_buf, sizeof(age_buf), "%.2f days",               age_s/86400.0);
+    else                       std::snprintf(age_buf, sizeof(age_buf), "%.2f sim-yr (%.0f days)", age_y,      (float)(age_s/86400.0));
+
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+    ImGui::Text("ACCUMULATED AGE: %s", age_buf);
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("exp(-age_yr / %.1f yr) \u2014 kEnvHalfLifeYears pinned at compile time", env_constants::kEnvHalfLifeYears);
+
+    ImGui::Spacing();
+
+    // Tape-health bar \u2014 hand-drawn green\u2192amber\u2192red gradient.
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+    ImGui::Text("TAPE HEALTH:");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImVec4 health_col = (h > 0.7f) ? Col::green : (h > 0.4f ? Col::amber : Col::red);
+    ImGui::PushStyleColor(ImGuiCol_Text, health_col);
+    ImGui::Text(" %.0f%%", h * 100.f);
+    ImGui::PopStyleColor();
+    {
+        ImVec2 p0    = ImGui::GetCursorScreenPos();
+        float  bar_w = ImGui::GetContentRegionAvail().x;
+        float  bar_h = 14.f;
+        auto*  dl    = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p0, {p0.x + bar_w, p0.y + bar_h},
+                          IM_COL32(40, 40, 50, 255), 3.f);
+        if (h > 0.f) {
+            // 1-px segments, green\u2192amber\u2192red, drawn left\u2192right across the
+            // bar; fill proportional to h. Up to 480 segments for a smooth
+            // gradient on wide tabs.
+            const float seg_w  = std::max(1.f, bar_w / 480.f);
+            const int   n_full = (int)(h * (bar_w / seg_w));
+            for (int i = 0; i < n_full; ++i) {
+                float t = (float)i / 479.f;        // 0..1 across the full bar
+                ImU32 col;
+                if (t < 0.5f) {
+                    float s = t * 2.f;
+                    col = IM_COL32(
+                        (int)(57 + 198 * s),
+                        255,
+                        (int)(57 * (1.f - s) + 80 * s),
+                        255);
+                } else {
+                    float s = (t - 0.5f) * 2.f;
+                    col = IM_COL32(
+                        255,
+                        (int)(255 - 200 * s),
+                        50,
+                        255);
+                }
+                float x0 = p0.x + i * seg_w;
+                dl->AddRectFilled(
+                    {x0, p0.y},
+                    {x0 + seg_w + 0.5f, p0.y + bar_h},
+                    col);
+            }
+        }
+        dl->AddRect(p0, {p0.x + bar_w, p0.y + bar_h},
+                    IM_COL32(85, 85, 115, 200), 3.f, 0, 1.f);
+        ImGui::Dummy({bar_w, bar_h});
+    }
+    ImGui::Spacing();
+
+    // \u2500\u2500 Failure-mode bit-set (Phase 5) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::red);
+    ImGui::TextUnformatted("FAILURE MODES");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    struct FM { TapeFailureMode mode; const char* label; const char* tip; };
+    static const FM modes[] = {
+        {TapeFailureMode::MOLD,               "MOLD (mould, high humidity)",
+         "RH \u2265 70% on a tape that has sim-time (auto)."},
+        {TapeFailureMode::EDGE_PEEL,          "EDGE_PEEL (humid + old)",
+         "age \u00d7 temp_rate above reference (auto)."},
+        {TapeFailureMode::CREASE,             "CREASE (sticky shed + crease)",
+         "TRIGGER-only when sticky_shed \u2265 0.9 (manual gate)."},
+        {TapeFailureMode::STRETCHED,          "STRETCHED (tension + age)",
+         "tension_load \u2265 0.10 on aged tape (auto)."},
+        {TapeFailureMode::CHEM_DEATH,         "CHEM_DEATH (binder breakdown)",
+         "age on hot tape (auto) \u2014 exp((T-20)/8) \u00d7 age_yr > 0."},
+        {TapeFailureMode::SNAP,               "SNAP (tape dead)",
+         "TRIGGER-only when env_tape_health < 0.1 (manual gate)."},
+        {TapeFailureMode::MAGNETISATION_LOSS, "MAGNETISATION_LOSS (long-term / hot)",
+         "age_yr \u00d7 exp((T_c-20)/12) \u2265 30 (auto)."},
+    };
+    uint32_t fm = _ui_params.env_failure_modes;
+    for (auto& m : modes) {
+        uint32_t bit = (uint32_t)m.mode;
+        bool on = (fm & bit) != 0u;
+        if (ImGui::Checkbox(m.label, &on)) {
+            if (on)  fm |= bit;
+            else     fm &= ~bit;
+            _ui_params.env_failure_modes = fm;
+            c = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m.tip);
+    }
+    if (fm == 0u) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::grey);
+        ImGui::TextUnformatted("  [PRISTINE]");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
+
+    // \u2500\u2500 TRIGGER BREAK \u2014 walks catalog top\u2192bottom, fires highest-ranked applicable.
+    if (_col_button("  TRIGGER BREAK  ", Col::red_dim, Col::red, 200)) {
+        // Evaluate every precondition ONCE on the _ui_params snapshot.
+        // The audio-thread env module will re-evaluate on the next
+        // dsp_process pass and seed effective_p accordingly, so the math
+        // here matches what the env module actually uses.
+        const float  age_y_l   = (float)(_ui_params.env_age_seconds / env_constants::kSecondsPerYear);
+        const float  T_c       = _ui_params.env_temperature_c;
+        const float  RH        = _ui_params.env_humidity_pct;
+        const float  drift     = std::pow(2.0f, (T_c - 20.f) / 10.f);          // temp_rate
+        const float  hslope    = std::pow(2.0f, (T_c - 20.f) / 12.f);          // MAGNETISATION_LOSS curve
+        // Re-derive sticky_shed envy of the env module's formula for CREASE gate:
+        const float  sticky_e  = std::min(1.0f,
+            std::exp((T_c - 20.f) / 8.f) *
+            std::max(0.0f,
+                std::max(0.0f, (RH - 50.f) / 50.f) +
+                std::pow(std::max(0.0f, (RH - 70.f) / 30.f), 2.f)) *
+            (age_y_l / 2.0f));
+        const float  sticky_v  = std::max(_ui_params.sticky_shed, sticky_e);
+
+        // Walk catalog highest\u2192lowest (MAGNETISATION_LOSS first). First\n eligible is fired.
+        static const TapeFailureMode order[] = {
+            TapeFailureMode::MAGNETISATION_LOSS,
+            TapeFailureMode::SNAP,
+            TapeFailureMode::CHEM_DEATH,
+            TapeFailureMode::STRETCHED,
+            TapeFailureMode::CREASE,
+            TapeFailureMode::EDGE_PEEL,
+            TapeFailureMode::MOLD,
+        };
+        bool fired = false;
+        for (auto m : order) {
+            bool eligible = false;
+            const char* why = "";
+            switch (m) {
+                case TapeFailureMode::MAGNETISATION_LOSS:
+                    eligible = (age_y_l * hslope) >= 30.f;
+                    why = "age \u00d7 exp((T-20)/12) \u2265 30";
+                    break;
+                case TapeFailureMode::SNAP:
+                    eligible = _ui_params.env_tape_health < 0.1f;
+                    why = "tape_health < 0.1";
+                    break;
+                case TapeFailureMode::CHEM_DEATH:
+                    eligible = (age_y_l > 0.f) && (T_c > 20.f);
+                    why = "age > 0 and T > 20 (\u00b0C)";
+                    break;
+                case TapeFailureMode::STRETCHED:
+                    eligible = (age_y_l > 0.f) && (_ui_params.tension_load >= 0.10f);
+                    why = "tension_load \u2265 0.10 \u00d7 sim-time";
+                    break;
+                case TapeFailureMode::CREASE:
+                    eligible = sticky_v >= 0.9f;
+                    why = "sticky_shed \u2265 0.9";
+                    break;
+                case TapeFailureMode::EDGE_PEEL:
+                    eligible = (age_y_l > 0.f) && (drift > 1.f);
+                    why = "age > 0 and temperature above reference";
+                    break;
+                case TapeFailureMode::MOLD:
+                    eligible = (age_y_l > 0.f) && (RH >= 70.f);
+                    why = "RH \u2265 70% \u00d7 sim-time";
+                    break;
+                default: break;
+            }
+            if (eligible) {
+                _ui_params.env_failure_modes |= (uint32_t)m;
+                std::fprintf(stderr,
+                    "[ui:env] TRIGGER BREAK fired mode=%u (%s) \u2014 bit now set in env_failure_modes\n",
+                    (uint32_t)m, why);
+                fired = true;
+                break;
+            }
+        }
+        if (!fired) {
+            std::fprintf(stderr,
+                "[ui:env] TRIGGER BREAK: no applicable mode (age_y=%.3f, T=%.1f, RH=%.1f, health=%.3f, tension=%.3f, sticky=%.3f)\n",
+                age_y_l, T_c, RH, _ui_params.env_tape_health, _ui_params.tension_load, sticky_v);
+        }
+        c = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Walks the failure-mode catalog top\u2192bottom (MAGNETISATION_LOSS first) and fires the highest-ranked mode whose eligibility preconditions hold. Audit-trail logged to stderr.");
+
+    ImGui::SameLine();
+    if (_col_button("  RESET TAPE  ", Col::bg3, Col::grey_lt, 140)) {
+        _ui_params.env_age_seconds   = 0.0;
+        _ui_params.env_tape_health   = 1.0f;
+        _ui_params.env_failure_modes = 0u;
+        std::fprintf(stderr, "[ui:env] RESET TAPE \u2014 wear cleared (age=0, health=1.0, failure_modes=0).\n");
+        c = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Clears env_age_seconds, env_tape_health, and env_failure_modes. Storage profile / temperature / humidity / \u03b1 are NOT reset \u2014 use the sliders or storage combo to change them.");
+
+    if (c) _sync_params();
+    ImGui::EndChild();
 }

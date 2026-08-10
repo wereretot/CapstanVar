@@ -456,6 +456,80 @@ above (e.g., env drift on the EQ shelves), that work must:
 - Carry the audibility verification through the lifetime of the
   feature, not just the initial commit.
 
+#### Environment tab UX spec (Phase 5d)
+
+The Environment tab in `src/ui.cpp::_draw_environment_tab()` is a
+4th tab alongside Transport Mechanics / Magnetic Flux / Electronics &
+Wear. Two-piece vertical layout:
+
+1. **Storage profile (Phase 5c).** Combo at the top drives `T_c` and
+   `RH_pct` only — `env_age_seconds`, `env_tape_health`, `α`, and
+   `env_failure_modes` are NOT reset (wear preserved across profile
+   changes, per `PRESET_SCHEMA.md` §“Phase 5 storage presets”).
+   Combo preview auto-detects the active profile when the (T_c, RH)
+   pair matches a built-in within a 0.05 tolerance; hand editing
+   either slider detaches the preview to “── Custom ──” and badge
+   to “overridden — Custom” (orange).
+
+   The four profiles (from `storage_profiles()` in
+   `include/mod_environment.hpp`):
+   - Controlled (T=20 °C / RH=50%, vault; reference state).
+   - Consumer Closet (T=25 °C / RH=60%, typical bedroom; mild).
+   - Hot Attic (T=35 °C / RH=70%, abandoned; aggressive).
+   - Cold Warehouse (T=10 °C / RH=40%, unheated; below reference).
+
+2. **Sliders (3).** Temperature [0..60], humidity [0..100], age
+   acceleration α [0.1..10000]. All three use the existing
+   `_aslider()` row widget so they participate in the keyframe /
+   timeline system. Sliders are not reset by storage profile\n     selection (storage profile only sets the *target* (T_c, RH);\n     the user can still nudge the values off-profile).
+
+3. **Wear state readouts.**
+   - Accumulated age formatted by magnitude: `%.1f s` < 60 s,
+     `%d m %d s` < 1 h, `%.1f hours` < 1 day, `%.2f days` < 1 yr,
+     `%.2f sim-yr (N days)` ≥ 1 yr.
+   - Tape-health progress bar (hand-drawn): green→amber→red
+     gradient across 1-px segments, with a numeric “%.0f%%” right-
+     aligned. Color thresholds: >0.7 green, >0.4 amber, else red.
+
+4. **Failure-mode bit-set.** Seven `ImGui::Checkbox` entries bound
+   directly to the `env_failure_modes` bit-set (option A — UI can
+   pin a specific mode without invoking TRIGGER). The PRISTINE
+   sentinel (`env_failure_modes == 0`) is shown as a derived grey
+   badge next to the last checkbox. Tooltips surface the
+   precondition from §“Phase 5 failure-mode catalog”.
+
+5. **TRIGGER BREAK button.** Walks the catalog top→bottom
+   (MAGNETISATION_LOSS first, then SNAP, CHEM_DEATH, STRETCHED,
+   CREASE, EDGE_PEEL, MOLD) and fires the highest-ranked mode whose
+   precondition holds. Logs the fired mode (and why) to **stderr**
+   (one line: `[ui:env] TRIGGER BREAK fired mode=N (reason)\n`); if
+   no mode is eligible, logs `[ui:env] TRIGGER BREAK: no applicable
+   mode (age_y, T, RH, health, tension, sticky)\n`. stderr-only so
+   CI pipelines that capture only stderr consistently see the
+   verdict.
+
+6. **RESET TAPE button.** Clears `env_age_seconds → 0`,
+   `env_tape_health → 1.0`, `env_failure_modes → 0`. Logs to
+   stderr (`[ui:env] RESET TAPE — wear cleared\n`). Storage profile,
+   temperature, humidity, and α are NOT reset (those have their own
+   controls). Use this when the user wants a fresh tape and existing
+   wear isn't useful.
+
+Threading: all controls touch `_ui_params` only on the GUI thread
+and copy to `_engine.params` under `engine.lock`. Every mutation
+flows through `_sync_params()` at the bottom of the
+`_draw_environment_tab()` function (cumulative `c |= _aslider(…)`
+followed by a single `if (c) _sync_params()` at the end) so the
+GUI-to-engine copy happens once per render frame, not once per
+slider tick.
+
+Audibility preservation at reference state: the combo starting on
+“Controlled” (T_c=20, RH_pct=50) keeps `effective_p == base_p`
+within numerical tolerance because every env-derived term collapses
+to zero. `EnvironmentModule::verify_reference_invariant()` (called
+once at startup from `main.cpp`) covers the math; this UX spec
+covers the surface.
+
 #### Files to touch (Phase 5)
 
 Schema-level diff: see companion doc

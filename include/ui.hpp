@@ -104,6 +104,7 @@ private:
     void _draw_transport_tab();
     void _draw_magnetic_tab();
     void _draw_electronics_tab();
+    void _draw_environment_tab();     // Phase 5: storage profile, env sliders, age/health/failures
     void _draw_transport_controls();   // always-visible bottom strip
     void _draw_render_dialog();
     void _draw_render_queue();
