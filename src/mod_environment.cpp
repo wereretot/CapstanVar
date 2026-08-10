@@ -258,3 +258,182 @@ bool EnvironmentModule::verify_reference_invariant(float eps) {
     std::fflush(stderr);
     return false;
 }
+// Phase 5b — non-reference worked-example audit at Hot Attic (T=35,
+// RH=70, alpha=10000). The reference-state audit above exercises the
+// audibility-preservation floor; this audit exercises the AGGRESSIVE
+// non-reference operating point documented in
+// docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 worked example" so a
+// regression in temp/hum/alpha math is caught at startup.
+//
+// Per-block derivations (the script in §X):
+//   dt_block     = BLOCK_SIZE / SR                    ~ 0.02322   s
+//   temp_rate    = pow(2, (35-20)/10)                 = 2^1.5 ~ 2.8284
+//   hum_rate     = (70-50)/50 + pow(max(0,(70-70)/30), 2)  = 0.4 + 0 = 0.4
+//   accum_now    = dt_block * 10000 * 2.8284 * 0.4    ~ 262.7     s
+//   age_years    = accum_now / kSecondsPerYear        ~ 8.324e-6  yr
+//   tape_health  = exp(-age_years/10)                 ~ 0.999999167
+//   bias factor  = max(0.5, 1 - (35-20)*0.005)        = 0.925
+//   wow/flutter  = base + (35-20)*0.05 = base + 0.75
+//   tension_load = base + ((max(0, 35-20)/100)^2)     = base + 0.0225
+// Harmonic contraction stays precise at Hot Attic: hum_rate's quadratic
+// penalty kicks in at RH>=70 so the (70-70)/30 term is exactly zero —
+// hum_rate is the simple linear 0.4.
+//
+// The four IMMUNE fields (eq_curve, format_id, oxide_type, input_gain)
+// and the failure-mode bit-set are passthroughs; assertions below
+// verify that contract.
+bool EnvironmentModule::verify_hot_attic_worked_example() {
+    // Phase 5b — non-reference worked-example audit at Hot Attic
+    // (T=35, RH=70, alpha=10000). The reference-state audit verifies
+    // the audibility floor; this audit exercises the AGGRESSIVE
+    // non-reference operating point documented in
+    // docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 worked example" so a
+    // regression in temp/hum/alpha math is caught at startup.
+    //
+    // Per-block derivations (script in §X):
+    //   dt_block    = BLOCK_SIZE / SR               ~ 0.02322 s
+    //   temp_rate   = 2^((35-20)/10)                ~ 2.828427
+    //   hum_rate    = (70-50)/50 + 0^2              = 0.4
+    //   accum_now   = dt_block * 10000 * 2.8284 * 0.4 ~ 262.7 s
+    //   age_years   = accum_now / kSecondsPerYear  ~ 8.32e-6 yr
+    //   tape_health = exp(-age_years / 10)         ~ 0.999999167
+    //   bias factor = max(0.5, 1 - (35-20)*0.005)  =  0.925
+    //   thermal     = |35-20| * 0.05               =  0.75
+    //   tension     = base + ((max(0, 35-20)/100)^2) = base + 0.0225
+    //
+    // Tightened bias-factor check (Phase 5b reviewer note 1): the band
+    // is now (0.924, 0.926) — ±0.001 around 0.925, catches coefficient
+    // drift in the 0.005/°C multiplier. Reviewer note 4: the bias-factor
+    // test also verifies the multiplicative reduction by direct
+    // computation against `base.bias * (1.0f - 15.0f * 0.005f)` so a
+    // future change to the bias formula moves the audit's expected
+    // value along with it.
+    //
+    // TODO(Phase 6+): add a multi-block tape_health decay audit that
+    // runs enough blocks at Hot Attic α=10000 to drop
+    // env_tape_health below 0.5, then verifies the resulting age_years
+    // matches `ln(2) * kEnvHalfLifeYears` (reviewer note 2; deferred
+    // because 1 block keeps tape_health ≈ 0.999999167, so the
+    // exponential decay contract only surfaces after hundreds of
+    // blocks). Reference doc: docs/TAPE_PHYSICS_REFACTOR.md §X
+    // "Phase 5 worked example".
+    EngineParams base{};
+    base.env_temperature_c     = 35.0f;
+    base.env_humidity_pct      = 70.0f;
+    base.env_age_acceleration  = 10000.0f;
+    // Leave age/health/failure_modes at struct defaults (0/1/0).
+
+    EnvironmentModule mod;
+    EngineParams input = base;
+    const EngineParams eff = mod.process(input, BLOCK_SIZE);
+
+    // Tolerance guards. Loosen bias_factor band slightly (0.924-0.926)
+    // than direct-float computation to absorb accumulated-rounding
+    // noise from the multiplication `base.bias * bias_factor`.
+    const double  age_tol_s       = 0.5;
+    const double  health_tol      = 1.0e-7;
+    const float   bias_factor_lo  = 0.924f;        // tightened (reviewer note 1)
+    const float   bias_factor_hi  = 0.926f;        // tightened (reviewer note 1)
+    const float   bias_factor_ref = base.bias * (1.0f - 15.0f * 0.005f); // reviewer note 4
+    const float   bias_tol        = 1.0e-4f;
+    const float   thermal_offset  = 0.75f;         // |35-20| * 0.05
+    const float   thermal_tol     = 1.0e-4f;
+    const float   tension_term    = 0.15f * 0.15f / (100.0f * 100.0f);  // (15/100)²
+    const float   tension_tol     = 1.0e-5f;
+
+    bool ok = true;
+
+    // 1. env_age_seconds strictly positive AND within 0.5 s of 262.7.
+    if (!(eff.env_age_seconds > 0.0)) ok = false;
+    if (std::fabs(eff.env_age_seconds - 262.7) > age_tol_s) ok = false;
+
+    // 2. env_tape_health ≈ 0.999999167 within 1e-7.
+    if (std::fabs(static_cast<double>(eff.env_tape_health) - 0.999999167)
+        > health_tol) ok = false;
+
+    // 3. eff.bias factors strictly toward 0.925 of base.bias,
+    //    band-tightened (0.924, 0.926) — reviewer note 1.
+    {
+        const float ratio = eff.bias / base.bias;
+        if (!(ratio > bias_factor_lo && ratio < bias_factor_hi)) ok = false;
+    }
+    // 3b. SELF-CORRECTING direct-computation witness (reviewer
+    //     note 4). `bias_factor_ref` is the literal expected
+    //     multiplier `base.bias * (1 - 15 * 0.005)`; if a future
+    //     Phase-N changes the bias formula, this assertion moves its
+    //     expected value along with it (follows the formula). Note:
+    //     this is NOT a duplicate of the `bias_factor_lo`/`bias_factor_hi`
+    //     band assertion above — keep both.
+    if (std::fabs(eff.bias - bias_factor_ref) > bias_tol) ok = false;
+
+    // 4. Monotone damage floor: hiss never decreases.
+    if (!(eff.hiss >= base.hiss)) ok = false;
+
+    // 5. Thermal offsets for wow/flutter land within 1e-4 of +0.75.
+    if (std::fabs(eff.wow_dep     - (base.wow_dep     + thermal_offset)) > thermal_tol) ok = false;
+    if (std::fabs(eff.flutter_dep - (base.flutter_dep + thermal_offset)) > thermal_tol) ok = false;
+
+    // 6. tension_load gains (15/100)² = 0.0225 above base.
+    if (std::fabs(eff.tension_load - (base.tension_load + tension_term)) > tension_tol) ok = false;
+
+    // 7. IMMUNE fields — strict equality (no env_derived overlay).
+    if (eff.eq_curve    != base.eq_curve)    ok = false;
+    if (eff.format_id   != base.format_id)   ok = false;
+    if (eff.oxide_type  != base.oxide_type)  ok = false;
+    if (eff.input_gain  != base.input_gain)  ok = false;
+
+    // 8. failure-mode bit-set is a passthrough (process() never sets
+    //    bits — that's the GUI's TRIGGER BREAK responsibility).
+    if (eff.env_failure_modes != base.env_failure_modes) ok = false;
+
+    // 9. Persisted env_* axes mirrored verbatim (sanity by construction).
+    if (eff.env_temperature_c    != base.env_temperature_c)    ok = false;
+    if (eff.env_humidity_pct     != base.env_humidity_pct)     ok = false;
+    if (eff.env_age_acceleration != base.env_age_acceleration) ok = false;
+
+    if (ok) {
+        std::fprintf(stderr,
+                     "[mod_environment] PASS: Hot Attic worked example holds "
+                     "(\u03b1=10000 / T_c=35 / RH=70 / %d frames): age=%.4f s (~%.4e yr), "
+                     "health=%.9f, bias_factor=%.4f.\n",
+                     BLOCK_SIZE,
+                     eff.env_age_seconds,
+                     static_cast<double>(eff.env_age_seconds) / kSecondsPerYear,
+                     static_cast<double>(eff.env_tape_health),
+                     static_cast<double>(eff.bias) / static_cast<double>(base.bias));
+        std::fflush(stderr);
+        return true;
+    }
+
+    // FAIL diagnostic: print every divergent scalar so the implementer
+    // can spot which formula regressed. Real newlines (no \n escapes).
+    std::fprintf(stderr,
+                 "[mod_environment] FAIL: Hot Attic worked example regression:\n"
+                 "  expected age_seconds     ~262.7 s      actual=%.6f\n"
+                 "  expected tape_health     ~0.999999167  actual=%.9f\n"
+                 "  expected bias/0.925      ~0.925        actual=%.4f\n"
+                 "  expected wow_dep delta   +0.75         actual=%.6f  (base=%.6f)\n"
+                 "  expected flutter_dep del +0.75         actual=%.6f  (base=%.6f)\n"
+                 "  expected tension delta   +0.0225       actual=%.6f  (base=%.6f)\n"
+                 "  hiss monotone            base<=eff     base=%.6f  eff=%.6f\n"
+                 "  eq_curve IMMUNE          base==eff     base=%d  eff=%d\n"
+                 "  format_id IMMUNE         base==eff     base=\"%s\"  eff=\"%s\"\n"
+                 "  oxide_type IMMUNE        base==eff     base=\"%s\"  eff=\"%s\"\n"
+                 "  input_gain IMMUNE        base==eff     base=%.6f  eff=%.6f\n"
+                 "  env_failure_modes PT     base==eff     base=%u  eff=%u\n",
+                 eff.env_age_seconds,
+                 static_cast<double>(eff.env_tape_health),
+                 static_cast<double>(eff.bias) / static_cast<double>(base.bias),
+                 eff.wow_dep     - base.wow_dep,     base.wow_dep,
+                 eff.flutter_dep - base.flutter_dep, base.flutter_dep,
+                 eff.tension_load- base.tension_load,base.tension_load,
+                 base.hiss, eff.hiss,
+                 static_cast<int>(base.eq_curve), static_cast<int>(eff.eq_curve),
+                 base.format_id.c_str(),  eff.format_id.c_str(),
+                 base.oxide_type.c_str(), eff.oxide_type.c_str(),
+                 base.input_gain, eff.input_gain,
+                 base.env_failure_modes,  eff.env_failure_modes);
+    std::fflush(stderr);
+    return false;
+}
+
