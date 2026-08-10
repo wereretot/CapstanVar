@@ -338,7 +338,7 @@ bool EnvironmentModule::verify_hot_attic_worked_example() {
     const float   bias_tol        = 1.0e-4f;
     const float   thermal_offset  = 0.75f;         // |35-20| * 0.05
     const float   thermal_tol     = 1.0e-4f;
-    const float   tension_term    = 0.15f * 0.15f / (100.0f * 100.0f);  // (15/100)²
+    const float   tension_term    = 15.0f * 15.0f / (100.0f * 100.0f);  // ((35-20)/100)² = 0.0225
     const float   tension_tol     = 1.0e-5f;
 
     bool ok = true;
