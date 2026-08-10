@@ -1997,8 +1997,23 @@ void CapstanApp::_sync_params() {
     _project_dirty = true;
 }
 
-void CapstanApp::_apply_preset(const EngineParams& p, const std::string&) {
+void CapstanApp::_apply_preset(const EngineParams& p, const std::string& name) {
     _ui_params = p;
+    // Phase 4 fix: validate format_id at every EngineParams arrival path.
+    // ep_from_json() guards the JSON-import path; this catches project-load
+    // (load_project copies EngineParams directly via _apply_preset), session
+    // presets, and any other path that bypasses ep_from_json. Stale ids
+    // (left over from pre-Phase-4 catalog renames) clear + warn so the UI
+    // shows "Custom (no coupling)" instead of a stale locked badge.
+    if (!_ui_params.format_id.empty() &&
+        !tape_format_by_id(_ui_params.format_id)) {
+        CV_ERR(PRESET_FORMAT_UNKNOWN,
+               "preset \u2018" + (name.empty() ? std::string{"(unnamed)"} : name) +
+               "\u2019 references unknown format_id \u2018" + _ui_params.format_id +
+               "\u2019 \u2014 clearing");
+        _ui_params.format_id.clear();
+        _ui_params.format_locked = false;
+    }
     _sync_params();
     _engine.trigger_fade_in(512);
 }

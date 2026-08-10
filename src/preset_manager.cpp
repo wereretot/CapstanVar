@@ -47,8 +47,30 @@ static EngineParams ep_from_json(const json& j) {
     get("head_bump",e.head_bump); get("azimuth_drift",e.azimuth_drift);
     get("sticky_shed",e.sticky_shed);
     if (j.contains("oxide_type"))    e.oxide_type   = j["oxide_type"].get<std::string>();
-    if (j.contains("format_id"))     e.format_id    = j["format_id"].get<std::string>();
-    if (j.contains("format_locked")) e.format_locked = j["format_locked"].get<bool>();
+    if (j.contains("format_id")) {
+        std::string fid = j["format_id"].get<std::string>();
+        if (!fid.empty() && !tape_format_by_id(fid)) {
+            // Phase 4 fix: warn + clear stale format_ids left over from
+            // pre-rename JSON (e.g., "Ampex_456_30_NAB" → "Ampex_456_30").
+            // Without this the dropdown would silently show "Custom (no
+            // coupling)" because the stale id no longer resolves to a
+            // catalog entry. Coupled oxide/eq/ips values are still loaded
+            // verbatim from JSON (ep_to_json wrote them out), so audibility
+            // is preserved.
+            std::string nm = j.value("__name__", std::string{"(unnamed)"});
+            CV_ERR(PRESET_FORMAT_UNKNOWN,
+                   "imported preset \u2018" + nm + "\u2019 references unknown format_id \u2018" +
+                   fid + "\u2019 \u2014 clearing");
+        } else {
+            e.format_id = fid;
+        }
+    }
+    if (j.contains("format_locked") && !e.format_id.empty()) {
+        e.format_locked = j["format_locked"].get<bool>();
+    } else {
+        // If the catalog id cleared, force detach so UI shows "Custom".
+        e.format_locked = false;
+    }
     if (j.contains("lf_trim_db"))    e.lf_trim_db   = j["lf_trim_db"].get<float>();
     if (j.contains("hf_trim_db"))    e.hf_trim_db   = j["hf_trim_db"].get<float>();
     if (j.contains("eq_curve"))
@@ -66,6 +88,34 @@ static EngineParams ep_from_json(const json& j) {
 #define P(k,v) e.k = v;
 #define END_PRESET _builtins.push_back({_pname, e}); }
 
+// ── Format-coupling helper ────────────────────────────────────────────────────
+// Phase 2/3 re-authoring: each reference-fidelity preset pulls its coupled
+// parameters (ips, eq_curve, oxide, bias, fluxivity, motor_health, hiss_floor)
+// from the TapeFormat catalog. The preset's free-form mechanical params
+// (motor_health*dial, wow/flutter, drive, hiss, head_bump, etc.) stay
+// independent so users can still tune the character without detaching the
+// format. format_locked is set true so the UI dropdown shows the catalog
+// label with the locked badge; touching any of the coupled knobs detaches.
+//
+// format_id is the canonical catalog key, e.g. "Studer_A820_15_IEC". Unknown
+// ids log a stderr warning at startup so missing catalog entries are loud
+// rather than silently degraded to Legacy free-form.
+static void apply_format(EngineParams& e, const std::string& fid) {
+    auto* f = tape_format_by_id(fid);
+    if (!f) {
+        if (!fid.empty())
+            CV_ERR(PRESET_FORMAT_UNKNOWN,
+                   "preset references unknown format_id '" + fid + "' — left free-form");
+        return;
+    }
+    e.format_id     = f->id;
+    e.format_locked = true;
+    e.ips_base      = f->ips;
+    e.eq_curve      = f->eq_curve;
+    e.oxide_type    = f->oxide;
+    e.bias          = f->bias_recommend;
+}
+
 EngineParams PresetManager::default_params() {
     return EngineParams{};  // all defaults defined in struct
 }
@@ -73,30 +123,41 @@ EngineParams PresetManager::default_params() {
 void PresetManager::_build_builtins() {
     // ── Studio / Pro ──────────────────────────────────────────────────────────
     BEGIN_PRESET("Ampex 456 (30ips)", 30.0f)
+        // NAB broadcast standard — pulls 456 oxide (MOL +6 dB, SM-grade
+        // sensitivity), AES-30 playback EQ shelf, bias trim from catalog.
+        // Phase 1/2/3 physics (MOL remap, HF rolloff, hysteresis) follow.
+        apply_format(e, "Ampex_456_30");
         P(motor_health,0.02f) P(wow_dep,0.008f) P(flutter_dep,0.004f)
-        P(scrape_flutter,0.025f) P(drive,1.05f) P(bias,1.0f)
-        P(hiss,0.000020f) P(hiss_color,0.1f) P(cutoff_base,22000.f)
+        P(scrape_flutter,0.025f) P(drive,1.05f)               // bias: catalog 1.0
+        P(hiss,0.000020f) P(hiss_color,0.1f)                 // cutoff_base: dropped (eq_curve != Legacy)
         P(head_bump,0.28f) P(print_through,0.005f) P(replay_diff,0.32f)
         P(mains_hum,0.000008f) P(barkhausen,0.004f) P(asperities,0.006f)
     END_PRESET
     BEGIN_PRESET("Ampex 456 (15ips)", 15.0f)
+        // NAB broadcast standard — 456 oxide, NAB-15 playback EQ.
+        apply_format(e, "Ampex_456_15_NAB");
         P(motor_health,0.04f) P(wow_dep,0.018f) P(flutter_dep,0.006f)
-        P(scrape_flutter,0.032f) P(drive,1.08f) P(bias,1.0f)
-        P(hiss,0.000039f) P(hiss_color,0.12f) P(cutoff_base,20000.f)
+        P(scrape_flutter,0.032f) P(drive,1.08f)
+        P(hiss,0.000039f) P(hiss_color,0.12f)
         P(head_bump,0.42f) P(print_through,0.006f) P(replay_diff,0.30f)
         P(mains_hum,0.000012f) P(barkhausen,0.006f) P(asperities,0.009f)
     END_PRESET
     BEGIN_PRESET("Studer A820 (30ips)", 30.0f)
+        // IEC mastering standard — SM911 oxide (low-noise balanced),
+        // IEC-15 playback EQ shelf, pristine transport.
+        apply_format(e, "Studer_A820_30_IEC");
         P(motor_health,0.01f) P(wow_dep,0.005f) P(flutter_dep,0.003f)
-        P(scrape_flutter,0.018f) P(drive,1.02f) P(bias,1.0f)
-        P(hiss,0.000013f) P(hiss_color,0.07f) P(cutoff_base,22000.f)
+        P(scrape_flutter,0.018f) P(drive,1.02f)
+        P(hiss,0.000013f) P(hiss_color,0.07f)
         P(head_bump,0.20f) P(print_through,0.004f) P(replay_diff,0.35f)
         P(mains_hum,0.000005f) P(barkhausen,0.002f) P(asperities,0.004f)
     END_PRESET
     BEGIN_PRESET("Studer A820 (15ips)", 15.0f)
+        // IEC mastering standard — SM911 oxide, IEC-15 playback EQ shelf.
+        apply_format(e, "Studer_A820_15_IEC");
         P(motor_health,0.025f) P(wow_dep,0.010f) P(flutter_dep,0.004f)
-        P(scrape_flutter,0.025f) P(drive,1.04f) P(bias,1.0f)
-        P(hiss,0.000025f) P(hiss_color,0.09f) P(cutoff_base,21000.f)
+        P(scrape_flutter,0.025f) P(drive,1.04f)
+        P(hiss,0.000025f) P(hiss_color,0.09f)
         P(head_bump,0.35f) P(print_through,0.005f) P(replay_diff,0.32f)
         P(mains_hum,0.000008f) P(barkhausen,0.004f) P(asperities,0.006f)
     END_PRESET
@@ -129,32 +190,42 @@ void PresetManager::_build_builtins() {
         P(mains_hum,0.000020f) P(barkhausen,0.010f) P(asperities,0.014f)
     END_PRESET
     BEGIN_PRESET("Revox B77 (7.5ips)", 7.5f)
+        // Catalog uses BASF_LH oxide + IEC-7.5 EQ (Swiss consumer deck
+        // convention — id label "NAB" in catalog is a vestigial name).
+        apply_format(e, "Revox_B77_7_5");
         P(motor_health,0.12f) P(wow_dep,0.05f) P(flutter_dep,0.011f)
-        P(scrape_flutter,0.045f) P(drive,1.18f) P(bias,0.97f)
-        P(hiss,0.000063f) P(hiss_color,0.18f) P(cutoff_base,17000.f)
+        P(scrape_flutter,0.045f) P(drive,1.18f)
+        P(hiss,0.000063f) P(hiss_color,0.18f)
         P(head_bump,0.52f) P(print_through,0.006f) P(replay_diff,0.29f)
         P(mains_hum,0.000018f) P(barkhausen,0.009f) P(asperities,0.012f)
     END_PRESET
     BEGIN_PRESET("Revox B77 (3.75ips)", 3.75f)
+        // Catalog uses BASF_LH oxide + NAB-3.75 EQ.
+        apply_format(e, "Revox_B77_3_75_NAB");
         P(motor_health,0.30f) P(wow_dep,0.18f) P(flutter_dep,0.028f)
-        P(scrape_flutter,0.070f) P(drive,1.38f) P(bias,0.90f)
-        P(hiss,0.000158f) P(hiss_color,0.30f) P(cutoff_base,12000.f)
+        P(scrape_flutter,0.070f) P(drive,1.38f)
+        P(hiss,0.000158f) P(hiss_color,0.30f)
         P(head_bump,0.80f) P(print_through,0.008f) P(replay_diff,0.24f)
         P(mains_hum,0.000025f) P(barkhausen,0.014f) P(asperities,0.018f)
     END_PRESET
     // ── Consumer reel ─────────────────────────────────────────────────────────
     BEGIN_PRESET("BASF LH Super (7.5ips)", 7.5f)
+        // BASF LH Super tape stock on consumer 7.5 ips deck — catalog
+        // entry uses BASF_LH oxide + IEC-7.5 EQ (consumer reel convention).
+        apply_format(e, "Revox_B77_7_5");
         P(motor_health,0.28f) P(wow_dep,0.10f) P(flutter_dep,0.020f)
-        P(scrape_flutter,0.055f) P(drive,1.28f) P(bias,0.90f)
-        P(hiss,0.000100f) P(hiss_color,0.26f) P(cutoff_base,14000.f)
+        P(scrape_flutter,0.055f) P(drive,1.28f)
+        P(hiss,0.000100f) P(hiss_color,0.26f)
         P(head_bump,0.70f) P(print_through,0.008f) P(replay_diff,0.25f)
         P(mains_hum,0.000025f) P(barkhausen,0.014f) P(asperities,0.018f)
         P(crosstalk,0.03f) P(tension_load,0.008f)
     END_PRESET
     BEGIN_PRESET("Maxell UD (7.5ips)", 7.5f)
+        // Maxell UD consumer reel — Maxell_UD oxide + IEC-7.5 EQ.
+        apply_format(e, "Maxell_UD_7_5");
         P(motor_health,0.24f) P(wow_dep,0.09f) P(flutter_dep,0.017f)
-        P(scrape_flutter,0.048f) P(drive,1.24f) P(bias,0.92f)
-        P(hiss,0.000089f) P(hiss_color,0.24f) P(cutoff_base,15000.f)
+        P(scrape_flutter,0.048f) P(drive,1.24f)
+        P(hiss,0.000089f) P(hiss_color,0.24f)
         P(head_bump,0.62f) P(print_through,0.007f) P(replay_diff,0.26f)
         P(mains_hum,0.000020f) P(barkhausen,0.012f) P(asperities,0.016f)
         P(crosstalk,0.025f) P(tension_load,0.006f)
@@ -186,47 +257,60 @@ void PresetManager::_build_builtins() {
     END_PRESET
     // ── Cassette ──────────────────────────────────────────────────────────────
     BEGIN_PRESET("Type I (Fe2O3) Normal", 1.875f)
+        // Cassette Type I — Fe2O3 oxide, 3180+120µs EQ shelf.
+        apply_format(e, "Cassette_Type_I");
         P(motor_health,0.50f) P(wow_dep,0.70f) P(flutter_dep,0.070f)
-        P(scrape_flutter,0.065f) P(drive,1.45f) P(bias,0.85f)
-        P(hiss,0.000199f) P(hiss_color,0.45f) P(cutoff_base,12500.f)
+        P(scrape_flutter,0.065f) P(drive,1.45f)
+        P(hiss,0.000199f) P(hiss_color,0.45f)
         P(head_bump,0.80f) P(replay_diff,0.20f)
         P(mains_hum,0.000030f) P(barkhausen,0.025f) P(asperities,0.032f)
         P(crosstalk,0.14f) P(tension_load,0.015f)
     END_PRESET
     BEGIN_PRESET("Type II Chrome (CrO2)", 1.875f)
+        // Cassette Type II — CrO2 oxide (high-output), 3180+70µs EQ shelf.
+        // Phase 3 activates hysteresis_amt=0.10 + sens_10k=1.0 here (vs
+        // Fe2O3 0.85) — gently brighter HF saturation.
+        apply_format(e, "Cassette_Type_II");
         P(motor_health,0.40f) P(wow_dep,0.55f) P(flutter_dep,0.058f)
-        P(scrape_flutter,0.055f) P(drive,1.35f) P(bias,1.35f)
-        P(hiss,0.000125f) P(hiss_color,0.30f) P(cutoff_base,15000.f)
+        P(scrape_flutter,0.055f) P(drive,1.35f)
+        P(hiss,0.000125f) P(hiss_color,0.30f)
         P(head_bump,0.60f) P(replay_diff,0.25f)
         P(mains_hum,0.000022f) P(barkhausen,0.016f) P(asperities,0.022f)
         P(crosstalk,0.08f) P(tension_load,0.010f)
-        P(oxide_type,"CrO2")
     END_PRESET
     BEGIN_PRESET("Type IV Metal", 1.875f)
+        // Cassette Type IV — Metal particle, 3180+70µs EQ shelf, 160 nWb/m
+        // fluxivity. Phase 3 hysteresis_amt=0.20 weights the Preisach
+        // blend most heavily here.
+        apply_format(e, "Cassette_Type_IV");
         P(motor_health,0.28f) P(wow_dep,0.40f) P(flutter_dep,0.045f)
-        P(scrape_flutter,0.042f) P(drive,1.25f) P(bias,1.70f)
-        P(hiss,0.000079f) P(hiss_color,0.18f) P(cutoff_base,18000.f)
+        P(scrape_flutter,0.042f) P(drive,1.25f)
+        P(hiss,0.000079f) P(hiss_color,0.18f)
         P(head_bump,0.45f) P(replay_diff,0.30f)
         P(mains_hum,0.000015f) P(barkhausen,0.010f) P(asperities,0.014f)
         P(crosstalk,0.05f) P(tension_load,0.007f)
-        P(oxide_type,"Metal")
     END_PRESET
     BEGIN_PRESET("Dolby B (Type I)", 1.875f)
+        // Dolby-B NR cassette — same Type I physics + EQ, with hiss much
+        // lower because the model represents the decoded playback.
+        apply_format(e, "Cassette_Type_I");
         P(motor_health,0.45f) P(wow_dep,0.60f) P(flutter_dep,0.065f)
-        P(scrape_flutter,0.060f) P(drive,1.40f) P(bias,0.88f)
-        P(hiss,0.000063f) P(hiss_color,0.18f) P(cutoff_base,14000.f)
+        P(scrape_flutter,0.060f) P(drive,1.40f)
+        P(hiss,0.000063f) P(hiss_color,0.18f)
         P(head_bump,0.72f) P(replay_diff,0.22f)
         P(mains_hum,0.000025f) P(barkhausen,0.020f) P(asperities,0.026f)
         P(crosstalk,0.12f)
     END_PRESET
     BEGIN_PRESET("Dolby C (Type II)", 1.875f)
+        // Dolby-C NR Type II — CrO2 oxide + 70µs EQ shelf, even lower
+        // hiss (more aggressive NR decoding assumption).
+        apply_format(e, "Cassette_Type_II");
         P(motor_health,0.35f) P(wow_dep,0.48f) P(flutter_dep,0.052f)
-        P(scrape_flutter,0.050f) P(drive,1.30f) P(bias,1.35f)
-        P(hiss,0.000031f) P(hiss_color,0.14f) P(cutoff_base,15500.f)
+        P(scrape_flutter,0.050f) P(drive,1.30f)
+        P(hiss,0.000031f) P(hiss_color,0.14f)
         P(head_bump,0.55f) P(replay_diff,0.24f)
         P(mains_hum,0.000018f) P(barkhausen,0.014f) P(asperities,0.018f)
         P(crosstalk,0.06f) P(tension_load,0.008f)
-        P(oxide_type,"CrO2")
     END_PRESET
     BEGIN_PRESET("Lo-Fi Bedroom (Type I)", 1.875f)
         P(motor_health,1.00f) P(wow_dep,1.20f) P(flutter_dep,0.110f)

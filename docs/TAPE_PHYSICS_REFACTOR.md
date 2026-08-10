@@ -201,6 +201,67 @@ to set `format_id`, so they pick up the new physics automatically.
 Mechanical settings (`motor_health`, `wow_dep`, `flutter_dep`) continue to
 be free-form knobs independently of `format_id`.
 
+### Re-authored reference catalog (Phase 4, current)
+
+13 reference-fidelity presets now bind to `TapeFormat` catalog entries
+via the `apply_format()` static helper in `src/preset_manager.cpp`.
+Each preset pulls `ips_base` / `eq_curve` / `oxide_type` / `bias` from
+the catalog; free-form character params stay independent so users can
+still tune without detaching the format.
+
+| Built-in preset                  | Catalog id              | EQ standard |
+| -------------------------------- | ----------------------- | ----------- |
+| Ampex 456 (30ips)                | Ampex_456_30            | AES-30      |
+| Ampex 456 (15ips)                | Ampex_456_15_NAB        | NAB-15      |
+| Studer A820 (30ips)              | Studer_A820_30_IEC      | IEC-15      |
+| Studer A820 (15ips)              | Studer_A820_15_IEC      | IEC-15      |
+| Revox B77 (7.5ips)               | Revox_B77_7_5           | IEC-7.5     |
+| Revox B77 (3.75ips)              | Revox_B77_3_75_NAB      | NAB-3.75    |
+| BASF LH Super (7.5ips)           | Revox_B77_7_5[^basf]    | IEC-7.5     |
+| Maxell UD (7.5ips)               | Maxell_UD_7_5           | IEC-7.5     |
+| Type I (Fe2O3) Normal            | Cassette_Type_I         | 3180+120µs  |
+| Type II Chrome (CrO2)            | Cassette_Type_II        | 3180+70µs   |
+| Type IV Metal                    | Cassette_Type_IV        | 3180+70µs   |
+| Dolby B (Type I)                 | Cassette_Type_I         | 3180+120µs  |
+| Dolby C (Type II)                | Cassette_Type_II        | 3180+70µs   |
+
+EQ-standard defaults:
+
+- **Studer A820** → IEC (Swiss mastering convention). IEC shelf is
+  tighter (-3 dB @ 35µs) than NAB; brightens snare and vocal sibilance.
+- **Ampex 456** → NAB (American broadcast convention). NAB shelf rolls
+  off top a bit harder (-3 dB @ 50µs), warmer than IEC.
+- **Revox B77** → catalog literal (id `…_NAB` uses IEC-7.5 eq curve —
+  vestigial "NAB" suffix in the catalog is a known naming quirk; the
+  user can switch standards via the format dropdown if needed).
+- **Cassettes** → Type I/II/IV per the IEC cassette reference.
+
+Default EQ can be flipped per preset in the UI Electronics tab →
+Format dropdown — touching any coupled knob detaches (label flips to
+"Custom"). The IEC/NAB choice changes shelf time-constants only; the
+free-form hiss / drive / wow / flutter remain untouched.
+
+### Audibility verification (out-of-band)
+
+Format coupling flips audio behaviour along three axes:
+
+1. Playback EQ: legacy single-LP at `cutoff_base` → RBJ low+high shelf
+   pair with implicit ±3 dB shelf gained from the standards.
+2. Oxide MOL remap: knee/ceiling in `_saturate_bandwise` scale by
+   `pow(10, (mol - 6)/20)` so switching from SM900 (+9 dB MOL) to 456
+   (+6 dB MOL) does not change input level — only saturation
+   parameters retune (see §3 gotcha #2).
+3. Preisach hysteresis: each oxide's `hysteresis_amt` weight blends
+   fast_tanh ↔ PreisachLUT in the 4-band cascade.
+
+Audibility verification of the re-authored presets against real-world
+references (Studer A820, Ampex 456, Revox B77, Cassette decks) is
+manual — the user must A/B against known musical material in the app
+since no automated listening test is available in CI. The build
+verifies only that `tape_format_by_id()` resolves each preset's
+`format_id` and that the resulting `EngineParams` fields match the
+catalog; audibility is the human-in-the-loop final check.
+
 ---
 
 ## 4. CPU profile

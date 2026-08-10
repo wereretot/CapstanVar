@@ -202,10 +202,17 @@ inline const std::vector<TapeFormat>& tape_formats() {
         {"Studer_A820_30_NAB", "Studer A820 — 30 ips NAB",  30.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.0f, 0.010f, -68.f},
         {"Studer_A820_15_IEC", "Studer A820 — 15 ips IEC",  15.0f,  EQCurve::IEC_15, "SM911",  250.f, 1.0f, 0.025f, -67.f},
         {"Studer_A820_15_NAB", "Studer A820 — 15 ips NAB",  15.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.0f, 0.025f, -67.f},
-        {"Ampex_456_30_NAB",    "Ampex 456 — 30 ips NAB",    30.0f,  EQCurve::AES_30, "456",    250.f, 1.0f, 0.020f, -65.f},
+        // Phase 4 fix: id dropped "_NAB" suffix — the catalog always used
+        // AES_30 eq_curve (not NAB_15) at 30 ips because that is what Ampex
+        // machines actually used at 30 ips. Old id was a Phase-2 mislabel.
+        {"Ampex_456_30",       "Ampex 456 — 30 ips AES",    30.0f,  EQCurve::AES_30, "456",    250.f, 1.0f, 0.020f, -65.f},
         {"Ampex_456_15_NAB",    "Ampex 456 — 15 ips NAB",    15.0f,  EQCurve::NAB_15, "456",    250.f, 1.0f, 0.040f, -65.f},
         {"Ampex_456_15_IEC",    "Ampex 456 — 15 ips IEC",    15.0f,  EQCurve::IEC_15, "456",    250.f, 1.0f, 0.040f, -65.f},
-        {"Revox_B77_7_5_NAB",   "Revox B77 — 7.5 ips NAB",   7.5f,   EQCurve::IEC_7_5, "BASF_LH", 200.f, 0.97f, 0.120f, -63.f},
+        // Phase 4 fix: id dropped "_NAB" suffix — catalog used IEC_7_5
+        // (not NAB_7_5, which doesn't exist as a distinct curve) because
+        // Revox B77 decks in Europe shipped IEC-calibrated. Old id was a
+        // Phase-2 mislabel.
+        {"Revox_B77_7_5",      "Revox B77 — 7.5 ips IEC",   7.5f,   EQCurve::IEC_7_5, "BASF_LH", 200.f, 0.97f, 0.120f, -63.f},
         {"Revox_B77_3_75_NAB",  "Revox B77 — 3.75 ips NAB",  3.75f,  EQCurve::NAB_3_75, "BASF_LH", 200.f, 0.90f, 0.300f, -63.f},
         {"Maxell_UD_7_5",       "Maxell UD — 7.5 ips",       7.5f,   EQCurve::IEC_7_5, "Maxell_UD", 200.f, 0.92f, 0.240f, -62.f},
         // Cassette references
