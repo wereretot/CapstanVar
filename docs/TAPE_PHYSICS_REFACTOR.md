@@ -201,6 +201,12 @@ to set `format_id`, so they pick up the new physics automatically.
 Mechanical settings (`motor_health`, `wow_dep`, `flutter_dep`) continue to
 be free-form knobs independently of `format_id`.
 
+For the full per-field JSON schema reference (every field written by
+`ep_to_json`, every default, the 19-entry `format_id` ↔ catalog
+mapping table, the v0/v1/v2 migration rules, and a "what is **not** in
+a `.cvpr` file" rundown), see the companion document
+[`PRESET_SCHEMA.md`](PRESET_SCHEMA.md).
+
 ### Re-authored reference catalog (Phase 4, current)
 
 19 reference-fidelity presets now bind to `TapeFormat` catalog entries
