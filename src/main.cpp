@@ -1,4 +1,5 @@
 #include "ui.hpp"
+#include "mod_environment.hpp"
 #include <cstdio>
 #include <exception>
 #include <new>
@@ -15,6 +16,13 @@ int main() {
         std::set_new_handler(nullptr);
     });
     try {
+        // Phase 5 — Environment & aging reference-state sanity check.
+        // At T_c=20 °C / RH_pct=50 % / α=1.0 / age=0 the env module's
+        // effective_p must equal base_p within numerical tolerance.
+        // Run once at startup; cheap (<1ms, single block) and self-contained.
+        // See docs/TAPE_PHYSICS_REFACTOR.md §X "Audibility preservation".
+        EnvironmentModule::verify_reference_invariant();
+
         CapstanApp app;
         app.run();
     }

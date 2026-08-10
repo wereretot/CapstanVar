@@ -145,6 +145,40 @@ struct EngineParams {
     float      hf_trim_db     = 0.0f;             // ±6 dB HF trim
     std::string format_id     = "";               // canonical {machine, speed, EQ} key; "" = legacy free-form
     bool       format_locked  = false;            // when true, picking format snaps values; touching a knob detaches
+
+    // Phase 5 — Environment & aging. Option (a) instant-override preservation:
+    // at reference state (T_c=20, RH_pct=50, α=1.0, age=0) every env-derived
+    // field equals 0 and the env module's effective_p equals base_p within
+    // numerical tolerance. env_age_seconds and env_tape_health are persisted
+    // on the EngineParams struct (mutually authoritative), so loading a saved
+    // .cvpr restores wear across sessions.
+    //
+    // env_age_seconds and env_failure_modes use non-float types (double,
+    // uint32) — they cannot go through the existing F() macro path in
+    // preset_manager's ep_from_json, which calls j[k].get<float>(). Loader
+    // reads need explicit if (j.contains(k)) v = j[k].get<type> blocks.
+    float    env_temperature_c     = 20.0f;        // °C,  range 0..60     (reference: 20)
+    float    env_humidity_pct      = 50.0f;        // RH%, range 0..100    (reference: 50)
+    float    env_age_acceleration  = 1.0f;         // α,   range 0.1..10000 (reference: 1.0)
+    double   env_age_seconds       = 0.0;          // accumulated sim-seconds   (persisted, non-float)
+    float    env_tape_health       = 1.0f;         // 0..1, derived from age     (persisted)
+    uint32_t env_failure_modes     = 0u;           // bit-set of TapeFailureMode (persisted, non-float)
+};
+
+// Phase 5 — Failure-mode bit-set (uint32). `PRISTINE` is the implicit
+// env_failure_modes == 0 sentinel; bit 6 is repurposed as MAGNETISATION_LOSS
+// (see docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 failure-mode catalog").
+// Stored on EngineParams::env_failure_modes; bit semantics live here so the
+// module and the UI agree on field names.
+enum class TapeFailureMode : uint32_t {
+    PRISTINE           = 0u,
+    MOLD               = 1u << 0,
+    EDGE_PEEL          = 1u << 1,
+    CREASE             = 1u << 2,
+    STRETCHED          = 1u << 3,
+    CHEM_DEATH         = 1u << 4,
+    SNAP               = 1u << 5,
+    MAGNETISATION_LOSS = 1u << 6,
 };
 
 // ── EQ playback curves (Phase 2) ──────────────────────────────────────────────
