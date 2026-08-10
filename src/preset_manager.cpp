@@ -162,6 +162,8 @@ void PresetManager::_build_builtins() {
         P(mains_hum,0.000008f) P(barkhausen,0.004f) P(asperities,0.006f)
     END_PRESET
     BEGIN_PRESET("Otari MTR-90 (30ips)", 30.0f)
+        // Japanese 1/2-inch mastering deck; pulls SM911 oxide + AES-30 EQ.
+        apply_format(e, "Otari_MTR_90_30_AES");
         P(motor_health,0.012f) P(wow_dep,0.006f) P(flutter_dep,0.003f)
         P(scrape_flutter,0.022f) P(drive,1.03f) P(bias,1.0f)
         P(hiss,0.000016f) P(hiss_color,0.08f) P(cutoff_base,22000.f)
@@ -169,6 +171,8 @@ void PresetManager::_build_builtins() {
         P(mains_hum,0.000006f) P(barkhausen,0.003f) P(asperities,0.005f)
     END_PRESET
     BEGIN_PRESET("Otari MTR-90 (15ips)", 15.0f)
+        // Otari MTR-90 at 15 ips; pulls SM911 oxide + NAB-15 EQ.
+        apply_format(e, "Otari_MTR_90_15_NAB");
         P(motor_health,0.035f) P(wow_dep,0.013f) P(flutter_dep,0.005f)
         P(scrape_flutter,0.028f) P(drive,1.06f) P(bias,1.0f)
         P(hiss,0.000031f) P(hiss_color,0.10f) P(cutoff_base,20500.f)
@@ -176,6 +180,8 @@ void PresetManager::_build_builtins() {
         P(mains_hum,0.000010f) P(barkhausen,0.005f) P(asperities,0.007f)
     END_PRESET
     BEGIN_PRESET("MCI JH-24 (30ips)", 30.0f)
+        // American MCI/Quantegy 24-track mastering deck; 456 oxide + AES-30 EQ.
+        apply_format(e, "MCI_JH_24_30_AES");
         P(motor_health,0.020f) P(wow_dep,0.009f) P(flutter_dep,0.005f)
         P(scrape_flutter,0.030f) P(drive,1.07f) P(bias,1.0f)
         P(hiss,0.000020f) P(hiss_color,0.18f) P(cutoff_base,21000.f)
@@ -183,6 +189,9 @@ void PresetManager::_build_builtins() {
         P(mains_hum,0.000015f) P(barkhausen,0.005f) P(asperities,0.008f)
     END_PRESET
     BEGIN_PRESET("Scotch 226 (7.5ips)", 7.5f)
+        // 3M Scotch 226 medium-output stock; American NAB-7.5 EQ + 456 oxide
+        // (closest MOL match in the 10-stock OxygenProps table).
+        apply_format(e, "Scotch_226_7_5_NAB");
         P(motor_health,0.15f) P(wow_dep,0.06f) P(flutter_dep,0.014f)
         P(scrape_flutter,0.050f) P(drive,1.22f) P(bias,0.95f)
         P(hiss,0.000079f) P(hiss_color,0.22f) P(cutoff_base,16000.f)
@@ -231,6 +240,8 @@ void PresetManager::_build_builtins() {
         P(crosstalk,0.025f) P(tension_load,0.006f)
     END_PRESET
     BEGIN_PRESET("Tascam 38 (7.5ips)", 7.5f)
+        // Japanese Tascam/TEAC 1/2-inch deck; IEC-7.5 EQ + BASF_LH oxide.
+        apply_format(e, "Tascam_38_7_5_IEC");
         P(motor_health,0.35f) P(wow_dep,0.14f) P(flutter_dep,0.026f)
         P(scrape_flutter,0.060f) P(drive,1.32f) P(bias,0.92f)
         P(hiss,0.000125f) P(hiss_color,0.28f) P(cutoff_base,14500.f)
@@ -436,6 +447,9 @@ void PresetManager::_build_builtins() {
     END_PRESET
     // ── Radio / Broadcast ─────────────────────────────────────────────────────
     BEGIN_PRESET("BBC Radiophonic (7.5ips)", 7.5f)
+        // BBC Radiophonic Workshop reference: British mastering-style IEC-7.5
+        // EQ + 456 oxide (closest MRL match to BBC's custom stock).
+        apply_format(e, "BBC_Radiophonic_7_5_IEC");
         P(motor_health,0.10f) P(wow_dep,0.042f) P(flutter_dep,0.009f)
         P(scrape_flutter,0.042f) P(drive,1.18f) P(bias,0.98f)
         P(hiss,0.000079f) P(hiss_color,0.18f) P(cutoff_base,16000.f)

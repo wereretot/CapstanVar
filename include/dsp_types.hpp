@@ -215,6 +215,27 @@ inline const std::vector<TapeFormat>& tape_formats() {
         {"Revox_B77_7_5",      "Revox B77 — 7.5 ips IEC",   7.5f,   EQCurve::IEC_7_5, "BASF_LH", 200.f, 0.97f, 0.120f, -63.f},
         {"Revox_B77_3_75_NAB",  "Revox B77 — 3.75 ips NAB",  3.75f,  EQCurve::NAB_3_75, "BASF_LH", 200.f, 0.90f, 0.300f, -63.f},
         {"Maxell_UD_7_5",       "Maxell UD — 7.5 ips",       7.5f,   EQCurve::IEC_7_5, "Maxell_UD", 200.f, 0.92f, 0.240f, -62.f},
+        // ── Phase 4+ additions: other pro / semi-pro / broadcast open-reel machines ──
+        // Otari MTR-90 is a Japanese 1/2-inch mastering deck used in studios
+        // through the late 80s; default oxide matches Ampex/Quantegy studio
+        // stock (SM911 low-noise grade).
+        {"Otari_MTR_90_30_AES","Otari MTR-90 — 30 ips AES",   30.0f,  EQCurve::AES_30, "SM911",  250.f, 1.00f, 0.012f, -68.f},
+        {"Otari_MTR_90_15_NAB","Otari MTR-90 — 15 ips NAB",   15.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.00f, 0.035f, -67.f},
+        // MCI JH-24 is an American 24-track built by MCI/Quantegy in Florida;
+        // AES-30 at 30 ips + Ampex/Quantegy 456 oxide is the canonical pairing.
+        {"MCI_JH_24_30_AES",   "MCI JH-24 — 30 ips AES",      30.0f,  EQCurve::AES_30, "456",    250.f, 1.00f, 0.020f, -65.f},
+        // Scotch 226 is 3M's medium-output consumer/pro stock from the 70s,
+        // very close to Ampex 456 in MOL/hysteresis. NAB-7.5 is the standard
+        // American broadcast pairing at 7.5 ips.
+        {"Scotch_226_7_5_NAB", "Scotch 226 — 7.5 ips NAB",    7.5f,   EQCurve::NAB_7_5, "456",   200.f, 0.95f, 0.150f, -65.f},
+        // Tascam 38 is a Japanese 1/2-inch Tascam/TEAC deck used in project
+        // studios and home recording. BASF_LH oxide is a sensible default for
+        // a deck that ships with European-style IEC tuning.
+        {"Tascam_38_7_5_IEC",  "Tascam 38 — 7.5 ips IEC",     7.5f,   EQCurve::IEC_7_5, "BASF_LH", 200.f, 0.92f, 0.350f, -63.f},
+        // BBC Radiophonic Workshop used custom-formulated oxide close to
+        // Ampex 456 in MOL; IEC-7.5 is the British master-calibration closest
+        // match available.
+        {"BBC_Radiophonic_7_5_IEC","BBC Radiophonic — 7.5 ips IEC", 7.5f, EQCurve::IEC_7_5, "456", 200.f, 0.98f, 0.100f, -65.f},
         // Cassette references
         {"Cassette_Type_I",     "Cassette — Type I (Fe₂O₃)", 1.875f, EQCurve::Cassette_I,     "Fe2O3", 100.f, 0.85f, 0.500f, -65.f},
         {"Cassette_Type_II",    "Cassette — Type II (CrO₂)", 1.875f, EQCurve::Cassette_II_IV, "CrO2",  100.f, 1.35f, 0.400f, -68.f},

@@ -203,7 +203,7 @@ be free-form knobs independently of `format_id`.
 
 ### Re-authored reference catalog (Phase 4, current)
 
-13 reference-fidelity presets now bind to `TapeFormat` catalog entries
+19 reference-fidelity presets now bind to `TapeFormat` catalog entries
 via the `apply_format()` static helper in `src/preset_manager.cpp`.
 Each preset pulls `ips_base` / `eq_curve` / `oxide_type` / `bias` from
 the catalog; free-form character params stay independent so users can
@@ -219,11 +219,34 @@ still tune without detaching the format.
 | Revox B77 (3.75ips)              | Revox_B77_3_75_NAB      | NAB-3.75    |
 | BASF LH Super (7.5ips)           | Revox_B77_7_5[^basf]    | IEC-7.5     |
 | Maxell UD (7.5ips)               | Maxell_UD_7_5           | IEC-7.5     |
+| Otari MTR-90 (30ips)             | Otari_MTR_90_30_AES      | AES-30      |
+| Otari MTR-90 (15ips)             | Otari_MTR_90_15_NAB      | NAB-15      |
+| MCI JH-24 (30ips)                | MCI_JH_24_30_AES         | AES-30      |
+| Scotch 226 (7.5ips)              | Scotch_226_7_5_NAB       | NAB-7.5     |
+| Tascam 38 (7.5ips)               | Tascam_38_7_5_IEC        | IEC-7.5     |
+| BBC Radiophonic (7.5ips)         | BBC_Radiophonic_7_5_IEC  | IEC-7.5     |
 | Type I (Fe2O3) Normal            | Cassette_Type_I         | 3180+120µs  |
 | Type II Chrome (CrO2)            | Cassette_Type_II        | 3180+70µs   |
 | Type IV Metal                    | Cassette_Type_IV        | 3180+70µs   |
 | Dolby B (Type I)                 | Cassette_Type_I         | 3180+120µs  |
 | Dolby C (Type II)                | Cassette_Type_II        | 3180+70µs   |
+
+### Oxide-vs-machine rationale (Phase 4+)
+
+Catalog oxide field selects the matching `OxideProps` entry from
+`oxide_presets()` (in `include/dsp_types.hpp`). Choice was driven by
+each machine's commonly-shipped stock at its heyday, falling back to
+the closest MOL/sensitivity match in the existing 10-stock table:
+
+- **Studer A820 / Otari MTR-90**: SM911 (low-noise balanced studio stock).
+- **Ampex 456 / MCI JH-24 / Scotch 226 / BBC Radiophonic**: 456
+  (medium-output, MRL-style +6 dB MOL).
+- **Revox B77 / BASF LH Super / Tascam 38**: BASF_LH or Maxell_UD
+  (consumer reel formulation, lower Hc, slightly higher hiss).
+- **Cassettes**: 4-stock legacy table (Fe2O3/CrO2/Metal/FeCo).
+
+If a reference typically pairs with a stock that differs markedly from
+the catalog default, override via the OXIDE dropdown in the preset bar.
 
 EQ-standard defaults:
 
