@@ -291,6 +291,190 @@ verifies only that `tape_format_by_id()` resolves each preset's
 `format_id` and that the resulting `EngineParams` fields match the
 catalog; audibility is the human-in-the-loop final check.
 
+### Phase 5 — environment & aging (design)
+
+Phase 5 wires temperature and humidity reactions into the DSP chain
+through a new `EnvironmentModule`
+(`include/mod_environment.hpp` + `src/mod_environment.cpp`) that sits
+at the top of `TapeEngine::dsp_process`. The module receives the
+user-facing `EngineParams base_p`, accumulates a wall-clock-derived
+env age, derives per-field damage, and returns an
+`EngineParams effective_p` that transport / magnetic / electronic /
+dropout / sticky-shed / print-through consume in place of `base_p`.
+
+#### Phase 5 aging math
+
+```
+T_c        = env_temperature_c              // °C
+RH_pct     = env_humidity_pct               // % RH
+α          = env_age_acceleration           // user multiplier
+Δt_block   = frames / sample_rate           // wall-clock seconds per block
+
+temp_rate  = pow(2, (T_c - 20) / 10)        // Arrhenius rule of thumb
+                                       // (doubling every 10°C above reference)
+hum_rate   = max(0, (RH_pct - 50) / 50)     // linear above 50% RH
+         +  max(0, (RH_pct - 70) / 30)^2   // quadratic penalty above 70% RH
+
+env_age_seconds += Δt_block × α × temp_rate × hum_rate
+env_tape_health   = exp(-env_age_seconds / half_life)   // half_life ≈ 10 yr nominal
+```
+
+At reference state (20°C, 50% RH, α=1.0, age=0): `temp_rate == 1.0`
+and `hum_rate == 0.0`, so `env_derived == 0` for every downstream
+field — see "Audibility preservation (Phase 5)" below.
+
+Variable shorthand used throughout the Phase 5 formulae (defined
+here so other sections don't have to re-derive them):
+
+- `T_c`   ≡ `env_temperature_c`
+- `RH_pct` ≡ `env_humidity_pct`
+- `α`     ≡ `env_age_acceleration`
+- `age`   when `age` or `age_years` appears without a suffix,
+  the formula treats the input as **sim-years** (i.e.,
+  `env_age_seconds / 31,557,600`); explicit `age_seconds` means
+  literal seconds.
+
+`half_life` is the only fitting constant and is **pinned at compile
+time to `kEnvHalfLifeYears = 10.0`** (declared in
+`include/mod_environment.hpp`). Rationale: keeping the rate of
+`env_tape_health` decay a single named constant lets users repro
+the audibility floor deterministically across builds, while
+exposing it as a runtime field would invite per-preset drift in
+audibility verification. If a future Phase-N ever needs per-preset
+half-life calibration, that work must add an `env_half_life_yr`
+field with an explicit `__version__` bump to 3 under the
+audibility-preservation policy below.
+
+Audibility verification hinge: at reference state (T_c=20,
+RH_pct=50, α=1, age=0),
+`temp_rate == 1 && hum_rate == 0 -> env_derived == 0` for every
+non-thermal-offset field, and every thermal offset evaluates to
+0 because `|T_c - 20| == 0`. So `effective_p == base_p` within
+numerical tolerance at reference, regardless of which formula
+above is later extended.
+
+Tunables for the rate formulae live alongside `env_*` fields in
+the schema; formulae are otherwise locked.
+
+#### Phase 5 per-field modulation (Option a, instant-override)
+
+`effective_p.x = max(base_p.x, env_derived_x)` for additive damage
+fields. Thermal drift is additive for mechanical fields and
+multiplicative for bias. Head bump softens as `tape_health` falls.
+
+| Field                   | env_derived                                                | Mode |
+| ----------------------- | ---------------------------------------------------------- | ---- |
+| `hiss`                  | `exp(age_years / 20) - 1.0` × `0.01`                       | additive floor |
+| `dropout_rate`          | `min(0.5, age_years / 5)`                                  | additive floor |
+| `oxide_shedding`        | `min(0.3, age_years / 8 × hum_rate)`                       | additive floor |
+| `sticky_shed`           | `min(1.0, exp((T-20)/8) × max(0, hum_rate) × age_years / 2)` | additive floor |
+| `mains_hum`             | `0.005 × exp((T-20)/10) × hum_rate × age_years / 10`      | additive floor |
+| `demagnetization`       | `min(0.5, exp((T-20)/5) × age_years)`                      | additive floor |
+| `print_through`         | `min(0.05, age_years / 20.0)`                              | additive floor |
+| `azimuth_drift`         | `min(0.5, age_years / 15.0 × temp_rate)`                  | additive floor |
+| `wow_dep`               | `|T_c - 20| × 0.05`                                        | additive offset |
+| `flutter_dep`           | `|T_c - 20| × 0.05`                                        | additive offset |
+| `tension_load`          | `(max(0, T_c - 20) / 100)²` (parenthesised; only fires above reference) | additive offset |
+| `bias`                  | `bias *= max(0.5, 1.0 - (T_c - 20) × 0.005)`               | multiplicative |
+| `head_bump`             | softens as `tape_health` falls (scaled by env_tape_health) | multiplicative |
+| `eq_curve`              | (untouched)                                                 | IMMUNE |
+| `format_id`             | (untouched)                                                 | IMMUNE |
+| `oxide_type`            | (untouched)                                                 | IMMUNE |
+| `input_gain`            | (untouched)                                                 | IMMUNE |
+
+IMMUNE fields preserve audibility for users who tune outside the
+env module's reach — playback EQ, catalog coupling, stock identity,
+and unity-gain input. Audibility verification at reference state
+relies on every other field's `env_derived == 0`; any relaxation of
+this rule is gated by the audibility-preservation rationale below.
+
+#### Phase 5 failure-mode catalog (`env_failure_modes` bit-set)
+
+`env_failure_modes` is a 32-bit flag set for **active** failure
+modes. The "pristine" state is the implicit absence of any flag bit
+(`env_failure_modes == 0`) — it is **not** a stored bit. Bit 6
+(formerly labelled `PRISTINE`) is rewritten as
+`MAGNETISATION_LOSS` (hysteresis collapse); UI surfaces the
+pristine sentinel as a derived-and-read-only badge.
+
+Bits 7–31 are reserved for future additions (do not claim without
+bumping the schema-version policy below).
+
+| Bit | `TapeFailureMode`     | Precondition / trigger                       | Audible signature                              |
+| --: | --------------------- | -------------------------------------------- | ---------------------------------------------- |
+|  0  | `MOLD`                | RH ≥ 70% × sim-time                          | Slow LF swish + cyan-tea dropout bursts        |
+|  1  | `EDGE_PEEL`           | age × temp_rate                              | HF roll-off + slow azimuth drift               |
+|  2  | `CREASE`              | user TRIGGER when sticky_shed ≥ 0.9          | Single transient click + narrowing dropout     |
+|  3  | `STRETCHED`           | tension_load ≥ 0.10 × sim-time               | Dropouts + crosstalk bleed                     |
+|  4  | `CHEM_DEATH`          | age × exp((T-20)/8)                          | Hiss sat. ceiling + MOL drop                    |
+|  5  | `SNAP`                | user TRIGGER when tape_health < 0.1          | Immediate silence (one block)                   |
+|  6  | `MAGNETISATION_LOSS`  | `age_years × exp((T_c-20)/12)` ≥ 30          | MOL collapses; saturation curve flattens       |
+
+Bit values are `1 << N`. The TRIGGER BREAK button in the
+Environment tab walks the table top→bottom and fires the highest-
+ranked mode whose preconditions currently hold; UI surfaces them as
+discrete checkboxes so a user can also pin a specific failure
+mode without invoking TRIGGER. The "PRISTINE" badge in the UI is
+derived from `env_failure_modes == 0`.
+
+#### Audibility preservation (Phase 5)
+
+Phase 5 follows the **Option (a) instant-override** model formalised
+in [`docs/PRESET_SCHEMA.md`](PRESET_SCHEMA.md), §"Option (a)
+instant-override preservation". Concretely, every gate that holds at
+reference state:
+
+1. **Reference state is silent.** At 20°C / 50% RH / α=1.0 / age=0,
+   every `env_derived_x == 0`, every thermal offset is zero, and
+   `bias` drift is zero. So `effective_p == base_p` within numerical
+   tolerance and existing presets sound identical to pre-Phase-5.
+2. **Append-only schema.** No field is renamed or removed, so the
+   loader's `if (j.contains(k))` pattern defaults new keys on read.
+   `__version__` stays at 2 — schema migration follows the same rule
+   as Phase 4+ did for the stale-id guard.
+3. **Free-form damage floors survive.** A hand-tuned
+   `sticky_shed = 0.6` keeps 0.6 as the floor; env only adds on top
+   of the user's entry, never replaces it.
+4. **EQ shelves never drift.** Even at Hot Attic temperature with
+   10 simulated years, the playback EQ shelves stay at the catalog-
+   defined time constants — audible change comes from hiss/oxide/
+   dropout/sticky-shed growth, never from EQ drift.
+5. **Audibility verification at reference state is a no-op.** The
+   Phase-5 audibility floor at reference state is
+   `effective_p == base_p` to machine tolerance. Manual A/B against
+   real-world references is therefore required only when env
+   modifiers are non-trivial (any of: env_age_seconds > 3 simulated
+   years, env_humidity_pct ≥ 60, env_temperature_c ≥ 30 or ≤ 10, or
+   any failure bit set).
+
+If any Phase-N (N ≥ 6) ever needs to bend one of the IMMUNE rules
+above (e.g., env drift on the EQ shelves), that work must:
+
+- Add a new explicit `env_*` field (no retroactive repurposing).
+- Bump `__version__` to 3 with an explicit migration rule in this
+  doc and in `docs/PRESET_SCHEMA.md`.
+- Carry the audibility verification through the lifetime of the
+  feature, not just the initial commit.
+
+#### Files to touch (Phase 5)
+
+Schema-level diff: see companion doc
+[`docs/PRESET_SCHEMA.md`](PRESET_SCHEMA.md) (the new
+"Phase 5 storage presets (4 built-in)" and "Option (a) instant-
+override preservation" sections). Code-level plan:
+
+| File                                       | Change                                                                |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| `include/dsp_types.hpp`                    | Append 6 `env_*` fields + `TapeFailureMode` enum + flag bit-set.     |
+| `include/mod_environment.hpp` (new)        | Module struct + `process(EngineParams&, frames) -> EngineParams`.    |
+| `src/mod_environment.cpp` (new)            | Aging math, modulation rules, failure-mode state.                    |
+| `include/engine.hpp` + `src/engine.cpp`    | Wire `EnvironmentModule` first in `dsp_process`.                      |
+| `src/mod_{magnetic,electronics,transport}.cpp` | Read `effective_p` instead of `base_p` in `process()`.          |
+| `src/ui.cpp`                               | New `_draw_environment_tab()` — storage combo, age/health readouts, TRIGGER BREAK button. |
+| `src/preset_manager.cpp`                   | Extend `ep_to_json`/`ep_from_json` with 6 env keys; add 4 storage presets. **Note**: `env_age_seconds` (`double`) and `env_failure_modes` (`uint32`) cannot use the existing `F()` macro path (which calls `j[k].get<float>()`); they need explicit `if (j.contains(k)) { v = j[k].get<...>(); }` blocks in `ep_from_json`. The four float-valued env fields (`env_temperature_c`, `env_humidity_pct`, `env_age_acceleration`, `env_tape_health`) can stay on the `F()` macro path. |
+| `docs/PRESET_SCHEMA.md`                    | New env-field row + storage-preset + Option (a) sections (this commit). |
+| `docs/TAPE_PHYSICS_REFACTOR.md`            | This §X Phase 5 section (this commit).                                |
+
 ---
 
 ## 4. CPU profile

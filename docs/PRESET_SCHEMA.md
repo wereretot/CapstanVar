@@ -14,6 +14,7 @@ authoritative reference.
 | Magic (`__app__`)       | `"CapstanVar"` — required for import             |
 | Schema version          | `2` (Phase 2; current)                            |
 | Phase 4+ compat         | Stale-id guard added; no schema bump             |
+| Phase 5 compat          | 6 env fields appended (domain → 38 fields). `__version__` stays at 2 (append-only). |
 
 `import_preset()` rejects any file whose `j.value("__app__", "")` is not
 the literal string `"CapstanVar"` and posts `PRESET_IMPORT_WRONG_APP`
@@ -37,9 +38,9 @@ the schema **append-only**: new fields can be added without a version
 bump because `ep_from_json` reads every field with a
 `if (j.contains(k)) v = j[k].get<float>()` guard.
 
-## Domain fields (32)
+## Domain fields (38)
 
-`ep_to_json` writes 32 domain fields. Defaults below match
+`ep_to_json` writes 38 domain fields. Defaults below match
 `EngineParams` struct initialisers in `include/dsp_types.hpp`.
 
 ### Metadata (6) — Phase 2 fields (since `__version__ = 2`)
@@ -106,6 +107,33 @@ bump because `ep_from_json` reads every field with a
 > goal; ecosystem pre-Phase-2 presets benefit from audibility preservation
 > when read without coupling.
 
+### Environment (6) — Phase 5 fields (append-only; `__version__` stays at 2)
+
+These six fields were appended to the `EngineParams` struct in
+Phase 5 (`include/dsp_types.hpp`) and are read/written from the same
+`F()` macro path as the magnetic/electronic/transport numerics. None
+of the 30+ existing pre-Phase-5 presets set these — round-tripping
+defaults them at load time, which is what makes the audibility
+floor identical to pre-Phase-5 (see "Option (a) instant-override
+preservation" below).
+
+| Key                     | Type    | Default | Range             | Persistence | Notes                                            |
+| ----------------------- | ------- | ------- | ----------------- | ----------- | ------------------------------------------------ |
+| `env_temperature_c`     | float   | `20.0`  | `0.0 .. 60.0`     | Runtime     | Ambient temperature in °C. Reference: 20.       |
+| `env_humidity_pct`      | float   | `50.0`  | `0.0 .. 100.0`    | Runtime     | Relative humidity %. Reference: 50.             |
+| `env_age_acceleration`  | float   | `1.0`   | `0.1 .. 10000.0`  | Runtime     | Age-mult multiplier. Wall-clock x this = sim-age. |
+| `env_age_seconds`       | double  | `0.0`   | n/a               | Persisted   | Running total of `block_secs × α × env_rate`.    |
+| `env_tape_health`       | float   | `1.0`   | `0.0 .. 1.0`      | Persisted   | `exp(-age_seconds / half_life)`. Read-only in UI. |
+| `env_failure_modes`     | uint32  | `0`     | bit-set           | Persisted   | Bit-set of `TapeFailureMode` flags (see catalog below). |
+
+> **Reference state**: with the four field defaults above (`20°C, 50%`,
+> α=1, age=0), `env_derived == 0` for every downstream field, so the
+> modified `EngineParams` passed to magnetic / electronic / transport
+> modules reproduces the pre-Phase-5 output within numerical
+> tolerance. Audibility verification at reference state is therefore
+> a no-op (see "Audibility preservation", §X of
+> `TAPE_PHYSICS_REFACTOR.md`).
+
 ### Preserved-but-not-exported (4)
 
 These are session-only state and are intentionally **not** written by
@@ -120,6 +148,118 @@ These are session-only state and are intentionally **not** written by
 
 Looking up these keys in a `.cvpr` file should be treated as **stale**;
 they will be ignored on load.
+
+## Phase 5 storage presets (4 built-in)
+
+Four bundled storage environments ship with Phase 5 inside
+`src/preset_manager.cpp`. They are `.cvpr` files like any other
+preset, but they only set the two runtime env knobs (temperature,
+humidity) — `env_age_acceleration`, `env_age_seconds`,
+`env_tape_health`, and `env_failure_modes` stay at their defaults
+and are user-driven from the Environment tab.
+
+| Storage environment  | `env_temperature_c` | `env_humidity_pct` | Aging impact (at α=1.0)                                                       |
+| -------------------- | -------------------: | -----------------: | ----------------------------------------------------------------------------- |
+| Controlled           |                 20.0 |               50.0 | Reference state — `env_derived ≈ 0` for every downstream field.               |
+| Consumer Closet      |                 25.0 |               60.0 | Mild — hiss grows after ~3 years; dropout creeps after ~5.                    |
+| Hot Attic            |                 35.0 |               70.0 | Aggressive — sticky shed becomes audible within ~1 year; mould risk.          |
+| Cold Warehouse       |                 10.0 |               40.0 | Below reference — hum_rate = 0, temp_rate = 0.5. Wow/flutter drift contributes the only audible change (≈ 0.5 each at T=10).       |
+
+EQ, oxide, format_id, and bias are **untouched** by switching storage
+presets — audibility for any non-environment parameter is preserved
+across swaps.
+
+**Worked example** (Hot Attic at α=1000.0, 60 wall-clock seconds of
+audio playback; `dsp_process` called once per audio block):
+
+```
+temp_rate       = pow(2, (35 - 20)/10)                    = 2.83
+hum_rate        = max(0, (70-50)/50) + max(0, (70-70)/30)^2 = 0.40
+env_age_seconds += 60 × 1.0 × 2.83 × 0.40                 = 67,920 s
+env_age_years   ≈ 67,920 / 31,557,600                    ≈ 0.00215 yr
+env_tape_health = exp(-0.00215 / kEnvHalfLifeYears)      ≈ 0.9998
+hiss add.       ≈ 0.01 × (exp(0.00215/20) - 1.0)         ≈ 1.1e-6
+```
+
+The hiss addition is below `hiss`'s default value of 0.001 by four
+orders of magnitude — inaudible against the existing hiss floor on
+either side. Audible degradation with Hot Attic requires roughly
+`env_age_seconds > 3 × 31,557,600` (i.e., > 3 sim-years).
+Wall-clock time-to-threshold at Hot Attic
+(temp_rate = 2.83, hum_rate = 0.40):
+
+| α       | Wall-clock seconds | Wall-clock days    |
+| ------- | ------------------ | ------------------ |
+| 1       |       83,576,000   |       ~2.65 yr     |
+| 10      |        8,358,000   |       ~96.7 d      |
+| 100     |          835,800   |       ~9.68 d      |
+| 1000    |           83,580   |       ~23.2 h      |
+| 10000   |            8,358   |       ~2.32 h      |
+| 100000  |              836   |       ~14 min      |
+
+So at α=1000 the audibility threshold is reached in roughly
+23 wall-clock hours; at α=10000 in roughly 2.3 hours; at α=100000
+in under 15 minutes. The audibility-preservation audibility floor
+(`effective_p == base_p`) still holds at any sim-age the user can
+realistically simulate via the Environment tab.
+
+**Variable shorthand** used here (defined fully in
+[`TAPE_PHYSICS_REFACTOR.md` §X "Phase 5 aging math"](TAPE_PHYSICS_REFACTOR.md)):
+
+- `T_c`    ≡ `env_temperature_c`
+- `RH_pct` ≡ `env_humidity_pct`
+- `α`      ≡ `env_age_acceleration`
+- `age`    or `age_years` (without a `_seconds` suffix) implicitly
+  converts `env_age_seconds` via 1 yr = 31,557,600 s.
+- `kEnvHalfLifeYears = 10.0` (compile-time constant in
+  `include/mod_environment.hpp`).
+
+## Option (a) instant-override preservation
+
+Phase 5's `EnvironmentModule` (new file `include/mod_environment.hpp`
++ `src/mod_environment.cpp`) sits at the top of
+`TapeEngine::dsp_process` and returns an `EngineParams effective_p`
+that the downstream modules consume instead of the user's
+`base_p`. The recipe is per-field:
+
+```
+effective_p.x = max(base_p.x, env_derived_x)        // additive damage fields
+effective_p.bias *= max(0.5, 1.0 - (T_c - 20) * 0.005)  // thermal drift (multiplicative)
+effective_p.wow_dep   += |T_c - 20| × 0.05          // thermal-expansion-driven mechanical
+effective_p.flutter_dep += |T_c - 20| × 0.05
+effective_p.tension_load  += (max(0, T_c - 20) / 100) × (max(0, T_c - 20) / 100)  // ((T_c-20)/100)²; cold has no contrib
+effective_p.head_bump *= env_tape_health           // decays as tape dies
+effective_p.eq_curve     = base_p.eq_curve         // IMMUNE (preserves standard playback EQ)
+effective_p.format_id    = base_p.format_id        // IMMUNE (preserves catalog coupling)
+effective_p.oxide_type   = base_p.oxide_type       // IMMUNE (preserves stock identity)
+effective_p.input_gain   = base_p.input_gain       // IMMUNE (unity gain path)
+```
+
+Consequences:
+
+1. **Reference state is silent.** At 20°C / 50% RH / α=1.0 / age=0,
+   every `env_derived_x == 0` and every thermal shift is 0, so
+   `effective_p == base_p` within numerical tolerance. Existing
+   presets sound identical to pre-Phase-5.
+2. **Hand-tuned damage survives.** A user who sets
+   `sticky_shed = 0.6` keeps 0.6 as the floor; env only adds **on
+   top of** their entry, never replaces it.
+3. **Append-only schema.** No field is renamed or removed, so the
+   loader's `if (j.contains(k))` pattern defaults new keys on read.
+   `__version__` stays at 2.
+4. **EQ shelves never drift.** Even at Hot Attic temperature with 10
+   simulated years of age, the playback EQ shelves stay at the
+   catalog-derived time constants — audibility changes come from
+   hiss/oxide/dropout/sticky-shed growth, not from EQ drift.
+5. **`oxide_type` is immune to env.** Switching 456 → SM911 with the
+   same env state changes audible character via the magnetic
+   saturator's MOL remap (Phase 3 gotcha #2), not via env.
+
+If any future Phase-N (N ≥ 6) ever needs to bend one of the IMMUNE
+rules above — e.g., let env drift EQ shelves — that work must add a
+new `env_*` field and bump `__version__` to 3 (per the "Phase 5
+audibility-preservation" policy in §X of
+`TAPE_PHYSICS_REFACTOR.md`).
 
 ## Schema migration
 
@@ -283,7 +423,13 @@ The smallest valid `.cvpr` file with all defaults:
     "cutoff_base": 18000.0,
     "head_bump": 0.5,
     "azimuth_drift": 0.05,
-    "sticky_shed": 0.0
+    "sticky_shed": 0.0,
+    "env_temperature_c": 20.0,
+    "env_humidity_pct": 50.0,
+    "env_age_acceleration": 1.0,
+    "env_age_seconds": 0.0,
+    "env_tape_health": 1.0,
+    "env_failure_modes": 0
 }
 ```
 
