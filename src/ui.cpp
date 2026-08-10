@@ -429,6 +429,27 @@ void CapstanApp::_draw_frame() {
     // Compute display params: base + curves (for slider visual feedback).
     // Also push animated values to engine every frame during playback.
     _display_params = _ui_params;
+    // Phase 5b fix — env_age_seconds and env_tape_health are ENGINE-OWNED
+    // (the audio thread accumulates them in dsp_process). Read them back
+    // under engine.lock AFTER the _ui_params copy so the Environment tab
+    // shows live values instead of struct defaults. Without this read-back,
+    // _draw_frame's downstream _anim block (and _sync_params) would post
+    // _ui_params.env_age_seconds (always 0.0) back to the engine — clobbering
+    // the freshly-accumulated value every UI frame at 60 Hz, faster than
+    // the audio thread (43 Hz) could increment it. Net: env_age_seconds
+    // oscillates between 0.0 and ~0.02 sim-sec, user sees 'it doesn't age'.
+    // Mirror into BOTH _display_params (sliders/animation path) and
+    // _ui_params (the Phase 5d env tab body added in commit 5e63174 reads
+    // directly from _ui_params). Safe to write _ui_params here because
+    // _sync_params no longer posts env_age_seconds/env_tape_health back
+    // to the engine.
+    {
+        std::lock_guard<std::mutex> g(_engine.lock);
+        _ui_params.env_age_seconds       = _engine.params.env_age_seconds;
+        _ui_params.env_tape_health       = _engine.params.env_tape_health;
+        _display_params.env_age_seconds = _engine.params.env_age_seconds;
+        _display_params.env_tape_health = _engine.params.env_tape_health;
+    }
     if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load()) {
         _anim.apply(_display_params, _engine.play_head);
         std::lock_guard<std::mutex> g(_engine.lock);
@@ -449,14 +470,16 @@ void CapstanApp::_draw_frame() {
         ep.eq_curve=_display_params.eq_curve; ep.lf_trim_db=_display_params.lf_trim_db;
         ep.hf_trim_db=_display_params.hf_trim_db; ep.format_id=_display_params.format_id;
         ep.format_locked=_display_params.format_locked;
-        // Phase 5 — Environment & aging (mirrors _sync_params below; the
-        // audio thread reads env_* via TapeEngine::dsp_process in a follow-up).
+        // Phase 5 — Environment & aging. user-controllable axes (temp, hum,
+        // α) flow UI → engine via _display_params. env_age_seconds and
+        // env_tape_health are ENGINE-OWNED: do NOT post them here or you'll
+        // stomp the freshly-accumulated values back to 0 at 60 fps.
+        // env_failure_modes is owned by the GUI's TRIGGER BREAK path; that
+        // path is exercised in another code path that writes directly to
+        // _engine.params under the lock, not via _display_params here.
         ep.env_temperature_c     = _display_params.env_temperature_c;
         ep.env_humidity_pct      = _display_params.env_humidity_pct;
         ep.env_age_acceleration  = _display_params.env_age_acceleration;
-        ep.env_age_seconds       = _display_params.env_age_seconds;
-        ep.env_tape_health       = _display_params.env_tape_health;
-        ep.env_failure_modes     = _display_params.env_failure_modes;
     }
 
     // ── Tabs — fixed height that leaves exactly TRANSPORT_H + margins at bottom
@@ -2001,16 +2024,17 @@ void CapstanApp::_sync_params() {
     ep.hf_trim_db    = _ui_params.hf_trim_db;
     ep.format_id     = _ui_params.format_id;
     ep.format_locked = _ui_params.format_locked;
-    // Phase 5 — Environment & aging (mirrors _draw_frame inline-copy above).
-    // The audio thread will eventually read these via TapeEngine::dsp_process,
-    // but they're synced here so the live UI and the env module's reference
-    // state share the same EngineParams snapshot.
+    // Phase 5 — Environment & aging. user-controllable axes (temp, hum,
+    // α) flow UI → engine. env_age_seconds and env_tape_health are
+    // ENGINE-OWNED and must NOT be posted here — the audio thread
+    // accumulates them in dsp_process; writing _ui_params.env_age_seconds
+    // back to the engine on every ui slider touch would clobber the
+    // accumulator. env_failure_modes is owned by the GUI's TRIGGER BREAK
+    // path (separate write site under the same lock) and is intentionally
+    // not pushed here either.
     ep.env_temperature_c     = _ui_params.env_temperature_c;
     ep.env_humidity_pct      = _ui_params.env_humidity_pct;
     ep.env_age_acceleration  = _ui_params.env_age_acceleration;
-    ep.env_age_seconds       = _ui_params.env_age_seconds;
-    ep.env_tape_health       = _ui_params.env_tape_health;
-    ep.env_failure_modes     = _ui_params.env_failure_modes;
     // Apply curves on top if playing
     if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load())
         _anim.apply(ep, _engine.play_head);
@@ -2018,7 +2042,22 @@ void CapstanApp::_sync_params() {
 }
 
 void CapstanApp::_apply_preset(const EngineParams& p, const std::string& name) {
-    _ui_params = p;
+    // Phase 5b polish — preserve wear across preset apply. The whole-struct
+    // _ui_params = p copy below would reset _ui_params.env_age_seconds and
+    // _ui_params.env_tape_health to whatever the preset carries (struct
+    // default 0.0 / 1.0 for storage presets). The per-frame readback in
+    // _draw_frame self-heals on the next UI frame, but the one-frame zero
+    // flash is observable. Monotonic union preserves the larger of the
+    // incoming value and the live wear so saved-restore from a .cvpr still
+    // wins (incoming 1.5 -> refresh wins; incoming 0.0 -> existing 14.2
+    // wins), matching Phase 5c verify_storage_preset_round_trip intent that
+    // storage presets do not reset wear.
+    EngineParams p_in = p;
+    p_in.env_age_seconds = std::max(p_in.env_age_seconds, _ui_params.env_age_seconds);
+    p_in.env_tape_health = (p_in.env_tape_health <= 0.0f)
+                           ? _ui_params.env_tape_health
+                           : std::min(p_in.env_tape_health, _ui_params.env_tape_health);
+    _ui_params = p_in;
     // Phase 4 fix: validate format_id at every EngineParams arrival path.
     // ep_from_json() guards the JSON-import path; this catches project-load
     // (load_project copies EngineParams directly via _apply_preset), session
