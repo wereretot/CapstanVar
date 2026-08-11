@@ -415,6 +415,34 @@ std::unique_ptr<TapeEngine> TapeEngine::make_worker(
     eng->transport.motor_engage        = 1.f;
     eng->transport.current_motor_speed = 1.f;
 
+    // ── Fast-forward env_age_seconds to natural continuous value ────────
+    // env_age_seconds tracks wall-clock-equivalent sim-seconds of tape
+    // playback. The natural value at any slice start_sample is
+    //     master  +  elapsed_to_start × dt_factor
+    // where elapsed_to_start is samples consumed so far (FORWARD:
+    // start_sample; REVERSE: total_samples − start_sample), and
+    // dt_factor is α × temp_rate × hum_rate / SR (constant per render).
+    // The audio warmup below advances env_age_seconds naturally through
+    // warmup_samples of conditioning, so we separately tick env.process
+    // through the (elapsed_to_start − warmup_samples) of "logical time"
+    // that precedes the audio warmup. Result: each slice worker enters
+    // its real processing with env_age_seconds at exactly the value that
+    // continuous playback would produce, eliminating per-chunk reset.
+    //
+    // env.process mutates only `p.env_age_seconds` and `p.env_tape_health`
+    // on the in/out EngineParams; per-field damage floors go through the
+    // returned copy and get re-applied during the audio path.
+    {
+        const double elapsed_to_start = eng->is_reversed
+            ? (double)(eng->total_samples - start_sample)
+            : (double)start_sample;
+        const int prefetch = std::max(0, (int)(elapsed_to_start - (double)warmup_samples));
+        const int n_full_blocks = prefetch / block_size;
+        for (int i = 0; i < n_full_blocks; ++i) {
+            eng->env.process(eng->params, block_size);
+        }
+    }
+
     std::vector<Frame> discard(block_size);
     if (!eng->is_reversed) {
         int warmup_start = std::max(0, start_sample - warmup_samples);
