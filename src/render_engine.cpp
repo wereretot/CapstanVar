@@ -370,7 +370,7 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
             }
 
             futures.push_back(std::async(std::launch::async,
-                [this, &eng, bs, os, seed, start, end, &blocks_done_atomic, total_blocks]() -> Chunk
+                [this, &eng, &opts, bs, os, seed, start, end, &blocks_done_atomic, total_blocks, has_anim]() -> Chunk
             {
                 auto worker = eng->make_worker(start, bs, os, seed, 24);
                 Chunk out;
@@ -379,6 +379,17 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
 
                 while (!_cancel_current.load()) {
                     if ((int)worker->play_head >= end) break;
+
+                    // Apply animation curves per-block — match the single-thread
+                    // render path. Previously multi-thread silently dropped
+                    // opts.anim.apply entirely, so any animated parameters were
+                    // ignored during parallel renders.
+                    if (has_anim) {
+                        opts.anim.apply(worker->params, worker->play_head);
+                        worker->params.tape_speed_mult = 1.0f;
+                        worker->params.motor_engage    = 1.0f;
+                    }
+
                     if (!worker->dsp_process(wb.data(), bs, os)) break;
 
                     // Trim last block if it overshoots the slice boundary
