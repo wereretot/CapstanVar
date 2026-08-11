@@ -194,6 +194,28 @@ void RenderEngine::_run_job(const QueuedJob& job, int job_idx, int total_jobs) {
     if (!qs.barkhausen)    eng->params.barkhausen    = 0.f;
     if (!qs.print_through) eng->params.print_through = 0.f;
 
+    // ── DSP warmup ──────────────────────────────────────────────────────────
+    // Process a small amount of audio and discard the output to prime the
+    // magnetic hysteresis, Barkhausen envelope, scrape flutter filter
+    // history, and the electronics IIR chains into their steady-state
+    // operating points BEFORE recording begins. This matches the warmup
+    // that make_worker() already does for parallel slice workers, and
+    // prevents the cold-start transient burst (heavy distortion+wow at
+    // the very start of the recorded file). The warmup does not touch
+    // play_head after seeking it back to 0 — filter state stays primed.
+    {
+        constexpr int kRenderWarmupBlocks = 8;
+        std::vector<Frame> warmup_discard(bs);
+        for (int i = 0; i < kRenderWarmupBlocks; ++i) {
+            if (!eng->dsp_process(warmup_discard.data(), bs, os)) break;
+        }
+        eng->play_head    = 0.0;
+        eng->current_time = 0.0f;
+        // Short output-amplitude ramp as click-safety belt, in case any
+        // sub-tap filter history leaks through the seeded state.
+        eng->trigger_fade_in(512);
+    }
+
     const int total_samples = eng->total_samples;
     if (total_samples == 0) {
         CV_ERR(RENDER_ENGINE_EMPTY, "No audio loaded — nothing to render");
