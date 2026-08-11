@@ -2635,9 +2635,21 @@ void CapstanApp::_draw_environment_tab() {
 
     ImGui::SameLine();
     if (_col_button("  RESET TAPE  ", Col::bg3, Col::grey_lt, 140)) {
-        _ui_params.env_age_seconds   = 0.0;
-        _ui_params.env_tape_health   = 1.0f;
-        _ui_params.env_failure_modes = 0u;
+        const double   reset_age   = 0.0;
+        const float    reset_hlth  = 1.0f;
+        const uint32_t reset_fail  = 0u;
+        _ui_params.env_age_seconds        = reset_age;
+        _ui_params.env_tape_health        = reset_hlth;
+        _ui_params.env_failure_modes      = reset_fail;
+        _display_params.env_age_seconds   = reset_age;
+        _display_params.env_tape_health   = reset_hlth;
+        _display_params.env_failure_modes = reset_fail;
+        {
+            std::lock_guard<std::mutex> g(_engine.lock);
+            _engine.params.env_age_seconds   = reset_age;
+            _engine.params.env_tape_health   = reset_hlth;
+            _engine.params.env_failure_modes = reset_fail;
+        }
         std::fprintf(stderr, "[ui:env] RESET TAPE \u2014 wear cleared (age=0, health=1.0, failure_modes=0).\n");
         c = true;
     }
