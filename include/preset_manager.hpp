@@ -28,6 +28,16 @@ public:
                        const EngineParams& p) const;
     std::optional<Preset> import_preset(const std::string& path) const;
 
+    // ── Phase 5c startup audit ─────────────────────────────────────────────────
+    // Round-trip smoke test for the 4 storage presets added to
+    // _build_builtins(). Iterates each storage preset, serializes via
+    // ep_to_json, deserializes via ep_from_json, and verifies the
+    // canonical storage-profile values survive the round-trip while
+    // the wear fields stay at struct defaults (storage presets must
+    // NOT reset existing wear). stderr-only output (PASS/FAIL).
+    // Called once from main.cpp alongside the env-module audits.
+    static bool verify_storage_preset_round_trip();
+
     // ── Default ───────────────────────────────────────────────────────────────
     static EngineParams default_params();
 

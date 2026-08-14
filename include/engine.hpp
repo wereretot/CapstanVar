@@ -4,6 +4,7 @@
 #include "mod_transport.hpp"
 #include "mod_magnetic.hpp"
 #include "mod_electronics.hpp"
+#include "mod_environment.hpp"
 
 #include <vector>
 #include <mutex>
@@ -31,6 +32,21 @@ public:
     EngineParams       params;
 
     // ── DSP modules ───────────────────────────────────────────────────────────
+    // Phase 5b — EnvironmentModule sits at the top of dsp_process (the
+    // first module to touch EngineParams each block). It accumulates
+    // wall-clock-derived environmental age, derives per-field damage,
+    // and rewrites the local `p` snapshot so downstream modules see
+    // effective values without signature changes. See
+    // docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 wiring".
+    //
+    // Threading contract (reviewer note 3): EnvironmentModule is
+    // STATELESS today — `process()` is a pure function of (p, frames).
+    // Multiple threads (audio + render workers + UI) may share this
+    // instance safely *as long as this contract holds*. If a future
+    // Phase-N adds instance fields (e.g. a per-oxide environmental
+    // LUT), revisit threading immediately: pin a single owner thread
+    // or guard the new fields with the same engine.lock.
+    EnvironmentModule  env;
     TransportDynamics  transport;
     MagneticPath       magnetic;
     ElectronicComponents electronics;

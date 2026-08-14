@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 static constexpr int   SR          = 44100;
@@ -27,23 +28,73 @@ struct Frame {
 };
 
 // ── Oxide presets ─────────────────────────────────────────────────────────────
+// OxideProps holds per-tape-stock physics data used by MagneticPath's
+// saturation block and ElectronicComponents' hiss mixer. Phase 1 of the
+// tape-physics refactor: expand OxideProps and populate 10 reference stocks.
+//
+// The first three fields (Hc/Ms/bias_trim) keep their existing semantics so
+// the 30+ built-in presets remain byte-identical. New fields below are
+// STAGED — runtime ignores them in Phase 1; Phase 2 will use mol_thd3_db to
+// remap the saturator's knee/ceiling, Phase 3 will use sens_* and
+// hysteresis_amt with the new Preisach LUT. See docs/TAPE_PHYSICS_REFACTOR.md.
 struct OxideProps {
-    float Hc;         // coercivity (Oersted)
-    float Ms;         // saturation magnetisation (normalised)
-    float bias_trim;  // optimal bias multiplier
+    // Phase 1 — read by MagneticPath::saturate_only and MagneticPath::process
+    float Hc;                  // coercivity (Oersted)
+    float Ms;                  // saturation magnetisation (normalised)
+    float bias_trim;           // optimal bias multiplier
+
+    // Phase 2+ — STAGED, runtime-ignored in Phase 1
+    float mol_thd3_db;         // MOL @ 3% THD, dB ref 200 nWb/m
+    float sens_1k;             // sensitivity at 1 kHz, linear (1.0 by definition)
+    float sens_10k;            // sensitivity at 10 kHz, linear rel. to 1 kHz
+    float sens_15k;            // sensitivity at 15 kHz, linear rel. to 1 kHz
+    float hf_rolloff_db_oct;   // HF rolloff above ~12 kHz, dB/oct (negative)
+    float hiss_floor_db;       // hiss floor in dB below MOL
+    float hysteresis_amt;      // 0..1 weight of Preisach hysteresis (Phase 3)
 };
 
+// 10 reference stocks. The 4 legacy keys (Fe2O3/CrO2/Metal/FeCo) keep their
+// Hc/Ms/bias_trim byte-identical to the pre-refactor values → audibility
+// preserved for the 30+ built-in presets that still reference them. The 6
+// new keys (456/SM911/SM900/GP9/Maxell_UD/BASF_LH) carry MRL-style data and
+// are available for Phase 6 preset reauthoring.
 inline const std::unordered_map<std::string, OxideProps>& oxide_presets() {
     static const std::unordered_map<std::string, OxideProps> P = {
-        {"Fe2O3", {250.0f,  1.0f,  1.00f}},
-        {"CrO2",  {480.0f,  1.2f,  1.35f}},
-        {"Metal", {1400.0f, 1.8f,  1.70f}},
-        {"FeCo",  {700.0f,  1.4f,  1.40f}},
+        // ── Legacy — Hc/Ms/bias_trim byte-identical to pre-refactor values ──
+        {"Fe2O3", {250.0f,  1.0f,  1.00f, +6.0f, 1.0f, 0.85f, 0.65f, -5.0f, -65.0f, 0.05f}},
+        {"CrO2",  {480.0f,  1.2f,  1.35f, +5.0f, 1.0f, 1.00f, 0.71f, -4.0f, -68.0f, 0.10f}},
+        {"Metal", {1400.0f, 1.8f,  1.70f, +7.0f, 1.0f, 0.89f, 0.63f, -2.5f, -70.0f, 0.20f}},
+        {"FeCo",  {700.0f,  1.4f,  1.40f, +6.0f, 1.0f, 0.85f, 0.55f, -5.5f, -66.0f, 0.05f}},
+        // ── New Phase-1 additions (MRL/Tape-Stock reference data) ──
+        {"456",       {320.0f, 1.15f, 1.05f, +6.0f, 1.0f, 0.89f, 0.71f, -4.0f, -65.0f, 0.10f}},
+        {"SM911",     {320.0f, 1.20f, 1.05f, +6.5f, 1.0f, 0.89f, 0.79f, -4.0f, -66.0f, 0.10f}},
+        {"SM900",     {360.0f, 1.30f, 1.10f, +9.0f, 1.0f, 0.71f, 0.50f, -3.5f, -68.0f, 0.15f}},
+        {"GP9",       {370.0f, 1.35f, 1.15f, +9.0f, 1.0f, 0.67f, 0.45f, -3.5f, -67.5f, 0.15f}},
+        {"Maxell_UD", {280.0f, 1.00f, 1.00f, +4.0f, 1.0f, 0.84f, 0.63f, -5.0f, -62.0f, 0.05f}},
+        {"BASF_LH",   {300.0f, 1.05f, 1.00f, +4.0f, 1.0f, 0.63f, 0.40f, -6.0f, -63.0f, 0.05f}},
     };
     return P;
 }
 
 static constexpr float HC_REF = 250.0f; // Fe2O3 reference coercivity
+
+// ── EQ playback curves (Phase 2) ──────────────────────────────────────────────
+// EQCurve selects a NAB / IEC / AES / cassette standard playback EQ curve.
+// "Legacy" is the pre-refactor default — uses the existing cutoff_base LP path
+// so all 30+ existing presets behave byte-identically. The non-Legacy curves
+// apply a low-shelf + high-shelf RBJ biquad pair derived from the standards'
+// LF / HF time constants (see docs/TAPE_PHYSICS_REFACTOR.md §5).
+enum class EQCurve : uint8_t {
+    Legacy          = 0,    // Pre-refactor: single Butterworth LP at cutoff_base
+    Cassette_I      = 1,    // 1.875 ips cassette Type I        (3180 + 120 µs)
+    Cassette_II_IV  = 2,    // 1.875 ips cassette Type II / IV  (3180 + 70  µs)
+    NAB_3_75        = 3,    // 3.75  ips NAB                     (3180 + 90  µs)
+    NAB_7_5         = 4,    // 7.5   ips NAB                     (3180 + 50  µs)
+    IEC_7_5         = 5,    // 7.5   ips IEC                     (3180 + 35  µs)
+    NAB_15          = 6,    // 15    ips NAB                     (3180 + 50  µs)
+    IEC_15          = 7,    // 15    ips IEC (mastering std)     (3180 + 35  µs)
+    AES_30          = 8,    // 30    ips AES                     (3180 + 17  µs)
+};
 
 // ── Engine parameters (all controls in one flat struct) ───────────────────────
 struct EngineParams {
@@ -87,7 +138,197 @@ struct EngineParams {
     float motor_engage     = 1.0f;
     float tape_speed_mult  = 1.0f;  // actual read stride (1=normal, 40=shuttle, <1=spindown)
     bool presaturated      = false;
+
+    // Phase 2 — EQ playback curves + format-id coupling (Hybrid refactor)
+    EQCurve    eq_curve       = EQCurve::Legacy;  // std playback EQ: Legacy = current LP path
+    float      lf_trim_db     = 0.0f;             // ±6 dB LF trim (applied on top of eq_curve)
+    float      hf_trim_db     = 0.0f;             // ±6 dB HF trim
+    std::string format_id     = "";               // canonical {machine, speed, EQ} key; "" = legacy free-form
+    bool       format_locked  = false;            // when true, picking format snaps values; touching a knob detaches
+
+    // Phase 5 — Environment & aging. Option (a) instant-override preservation:
+    // at reference state (T_c=20, RH_pct=50, α=1.0, age=0) every env-derived
+    // field equals 0 and the env module's effective_p equals base_p within
+    // numerical tolerance. env_age_seconds and env_tape_health are persisted
+    // on the EngineParams struct (mutually authoritative), so loading a saved
+    // .cvpr restores wear across sessions.
+    //
+    // env_age_seconds and env_failure_modes use non-float types (double,
+    // uint32) — they cannot go through the existing F() macro path in
+    // preset_manager's ep_from_json, which calls j[k].get<float>(). Loader
+    // reads need explicit if (j.contains(k)) v = j[k].get<type> blocks.
+    float    env_temperature_c     = 20.0f;        // °C,  range 0..60     (reference: 20)
+    float    env_humidity_pct      = 50.0f;        // RH%, range 0..100    (reference: 50)
+    float    env_age_acceleration  = 1.0f;         // α,   range 0.1..10000 (reference: 1.0)
+    double   env_age_seconds       = 0.0;          // accumulated sim-seconds   (persisted, non-float)
+    float    env_tape_health       = 1.0f;         // 0..1, derived from age     (persisted)
+    uint32_t env_failure_modes     = 0u;           // bit-set of TapeFailureMode (persisted, non-float)
 };
+
+// Phase 5 — Failure-mode bit-set (uint32). `PRISTINE` is the implicit
+// env_failure_modes == 0 sentinel; bit 6 is repurposed as MAGNETISATION_LOSS
+// (see docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 failure-mode catalog").
+// Stored on EngineParams::env_failure_modes; bit semantics live here so the
+// module and the UI agree on field names.
+enum class TapeFailureMode : uint32_t {
+    PRISTINE           = 0u,
+    MOLD               = 1u << 0,
+    EDGE_PEEL          = 1u << 1,
+    CREASE             = 1u << 2,
+    STRETCHED          = 1u << 3,
+    CHEM_DEATH         = 1u << 4,
+    SNAP               = 1u << 5,
+    MAGNETISATION_LOSS = 1u << 6,
+};
+
+// ── EQ playback curves (Phase 2) ──────────────────────────────────────────────
+// EQCurve is declared above (before EngineParams, which references it as the
+// default value for its eq_curve field).
+//
+// Time-constant lookup for non-Legacy curves. The LF shelf is always at fc
+// = 1 / (2π · 3180 µs) ≈ 50 Hz for every standard; the HF shelf is at
+// fc = 1 / (2π · τ_hf_us · 1e-6). Implicit shelf gains are lf_gain_db (LF)
+// and hf_gain_db (HF), with user LF/HF trims adding ±6 dB on top.
+struct EQSpec {
+    float hf_tau_s;    // HF shelf time constant in seconds (used in fc = 1/(2π·τ))
+    float lf_tau_s;    // LF shelf time constant (usually 3.180e-3)
+    float lf_gain_db;  // implicit LF shelf gain (representative; standards vary)
+    float hf_gain_db;  // implicit HF shelf gain (typically negative — playback rolls off top)
+};
+inline EQSpec eq_spec(EQCurve c) {
+    static const float T3180 = 3180.0e-6f;
+    switch (c) {
+    case EQCurve::Cassette_I:     return EQSpec{ 120.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::Cassette_II_IV: return EQSpec{  70.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::NAB_3_75:       return EQSpec{  90.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::NAB_7_5:        return EQSpec{  50.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::IEC_7_5:        return EQSpec{  35.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::NAB_15:         return EQSpec{  50.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::IEC_15:         return EQSpec{  35.0e-6f, T3180, +3.0f, -3.0f};
+    case EQCurve::AES_30:         return EQSpec{  17.0e-6f, T3180, +3.0f, -3.0f};
+    default:                      return EQSpec{   0.0f,    T3180,  0.0f,  0.0f};  // Legacy
+    }
+}
+
+// ── Tape formats (Phase 2) ────────────────────────────────────────────────────
+// TapeFormat binds the coupled parameters (speed, EQ curve, oxide, fluxivity,
+// recommended bias) for a canonical machine + speed + EQ standard combo.
+// Used by the format dropdown in src/ui.cpp; settings here are derived from
+// manufacturer / MRL reference data.
+struct TapeFormat {
+    std::string id;                // stable key, e.g. "Studer_A820_30_ips_IEC"
+    std::string display_name;      // human label, e.g. "Studer A820 — 30 ips IEC"
+    float       ips;               // canonical speed
+    EQCurve     eq_curve;          // canonical playback EQ
+    std::string oxide;             // canonical oxide ("SM911", "456", ...)
+    float       fluxivity_nWb_m;   // reference record fluxivity
+    float       bias_recommend;    // recommended bias level (multiplier, 1.0 = nominal)
+    float       motor_health;      // canonical pristine motor health (0 = perfect)
+    float       hiss_floor_db;     // canonical hiss floor relative to MOL (e.g. -68 dB)
+};
+
+// Canonical machine + speed + EQ formats. Each is a distinct preset of the
+// coupled parameters; the format readonly dropdown in ui.cpp enumerates these.
+inline const std::vector<TapeFormat>& tape_formats() {
+    static const std::vector<TapeFormat> F = {
+        // Open reel studio
+        {"Studer_A820_30_IEC", "Studer A820 — 30 ips IEC",  30.0f,  EQCurve::IEC_15, "SM911",  250.f, 1.0f, 0.010f, -68.f},
+        {"Studer_A820_30_NAB", "Studer A820 — 30 ips NAB",  30.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.0f, 0.010f, -68.f},
+        {"Studer_A820_15_IEC", "Studer A820 — 15 ips IEC",  15.0f,  EQCurve::IEC_15, "SM911",  250.f, 1.0f, 0.025f, -67.f},
+        {"Studer_A820_15_NAB", "Studer A820 — 15 ips NAB",  15.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.0f, 0.025f, -67.f},
+        // Phase 4 fix: id dropped "_NAB" suffix — the catalog always used
+        // AES_30 eq_curve (not NAB_15) at 30 ips because that is what Ampex
+        // machines actually used at 30 ips. Old id was a Phase-2 mislabel.
+        {"Ampex_456_30",       "Ampex 456 — 30 ips AES",    30.0f,  EQCurve::AES_30, "456",    250.f, 1.0f, 0.020f, -65.f},
+        {"Ampex_456_15_NAB",    "Ampex 456 — 15 ips NAB",    15.0f,  EQCurve::NAB_15, "456",    250.f, 1.0f, 0.040f, -65.f},
+        {"Ampex_456_15_IEC",    "Ampex 456 — 15 ips IEC",    15.0f,  EQCurve::IEC_15, "456",    250.f, 1.0f, 0.040f, -65.f},
+        // Phase 4 fix: id dropped "_NAB" suffix — catalog used IEC_7_5
+        // (not NAB_7_5, which doesn't exist as a distinct curve) because
+        // Revox B77 decks in Europe shipped IEC-calibrated. Old id was a
+        // Phase-2 mislabel.
+        {"Revox_B77_7_5",      "Revox B77 — 7.5 ips IEC",   7.5f,   EQCurve::IEC_7_5, "BASF_LH", 200.f, 0.97f, 0.120f, -63.f},
+        {"Revox_B77_3_75_NAB",  "Revox B77 — 3.75 ips NAB",  3.75f,  EQCurve::NAB_3_75, "BASF_LH", 200.f, 0.90f, 0.300f, -63.f},
+        {"Maxell_UD_7_5",       "Maxell UD — 7.5 ips",       7.5f,   EQCurve::IEC_7_5, "Maxell_UD", 200.f, 0.92f, 0.240f, -62.f},
+        // ── Phase 4+ additions: other pro / semi-pro / broadcast open-reel machines ──
+        // Otari MTR-90 is a Japanese 1/2-inch mastering deck used in studios
+        // through the late 80s; default oxide matches Ampex/Quantegy studio
+        // stock (SM911 low-noise grade).
+        {"Otari_MTR_90_30_AES","Otari MTR-90 — 30 ips AES",   30.0f,  EQCurve::AES_30, "SM911",  250.f, 1.00f, 0.012f, -68.f},
+        {"Otari_MTR_90_15_NAB","Otari MTR-90 — 15 ips NAB",   15.0f,  EQCurve::NAB_15, "SM911",  250.f, 1.00f, 0.035f, -67.f},
+        // MCI JH-24 is an American 24-track built by MCI/Quantegy in Florida;
+        // AES-30 at 30 ips + Ampex/Quantegy 456 oxide is the canonical pairing.
+        {"MCI_JH_24_30_AES",   "MCI JH-24 — 30 ips AES",      30.0f,  EQCurve::AES_30, "456",    250.f, 1.00f, 0.020f, -65.f},
+        // Scotch 226 is 3M's medium-output consumer/pro stock from the 70s,
+        // very close to Ampex 456 in MOL/hysteresis. NAB-7.5 is the standard
+        // American broadcast pairing at 7.5 ips.
+        {"Scotch_226_7_5_NAB", "Scotch 226 — 7.5 ips NAB",    7.5f,   EQCurve::NAB_7_5, "456",   200.f, 0.95f, 0.150f, -65.f},
+        // Tascam 38 is a Japanese 1/2-inch Tascam/TEAC deck used in project
+        // studios and home recording. BASF_LH oxide is a sensible default for
+        // a deck that ships with European-style IEC tuning.
+        {"Tascam_38_7_5_IEC",  "Tascam 38 — 7.5 ips IEC",     7.5f,   EQCurve::IEC_7_5, "BASF_LH", 200.f, 0.92f, 0.350f, -63.f},
+        // BBC Radiophonic Workshop used custom-formulated oxide close to
+        // Ampex 456 in MOL; IEC-7.5 is the British master-calibration closest
+        // match available.
+        {"BBC_Radiophonic_7_5_IEC","BBC Radiophonic — 7.5 ips IEC", 7.5f, EQCurve::IEC_7_5, "456", 200.f, 0.98f, 0.100f, -65.f},
+        // Cassette references
+        {"Cassette_Type_I",     "Cassette — Type I (Fe₂O₃)", 1.875f, EQCurve::Cassette_I,     "Fe2O3", 100.f, 0.85f, 0.500f, -65.f},
+        {"Cassette_Type_II",    "Cassette — Type II (CrO₂)", 1.875f, EQCurve::Cassette_II_IV, "CrO2",  100.f, 1.35f, 0.400f, -68.f},
+        {"Cassette_Type_IV",    "Cassette — Type IV (Metal)",1.875f, EQCurve::Cassette_II_IV, "Metal", 160.f, 1.70f, 0.280f, -70.f},
+    };
+    return F;
+}
+
+// Tape-format lookup by id; returns nullptr if id is "" or unknown.
+inline const TapeFormat* tape_format_by_id(const std::string& id) {
+    if (id.empty()) return nullptr;
+    for (auto& f : tape_formats())
+        if (f.id == id) return &f;
+    return nullptr;
+}
+
+// Maps an EQCurve enum value to a human-readable string used in JSON I/O
+// and as the EQ dropdown preview text.
+inline const char* eq_curve_name(EQCurve c) {
+    switch (c) {
+    case EQCurve::Legacy:         return "Legacy (single LP)";
+    case EQCurve::Cassette_I:     return "Cassette I (3180+120 µs)";
+    case EQCurve::Cassette_II_IV: return "Cassette II/IV (3180+70 µs)";
+    case EQCurve::NAB_3_75:       return "NAB 3.75 ips (3180+90 µs)";
+    case EQCurve::NAB_7_5:        return "NAB 7.5 ips (3180+50 µs)";
+    case EQCurve::IEC_7_5:        return "IEC 7.5 ips (3180+35 µs)";
+    case EQCurve::NAB_15:         return "NAB 15 ips (3180+50 µs)";
+    case EQCurve::IEC_15:         return "IEC 15 ips (3180+35 µs)";
+    case EQCurve::AES_30:         return "AES 30 ips (3180+17 µs)";
+    }
+    return "Legacy (single LP)";
+}
+
+// Inverse of eq_curve_name — parses a JSON eq_curve string back into the
+// enum. Unknown / empty strings default to Legacy for backward compat.
+inline EQCurve eq_curve_from_name(const std::string& s) {
+    if (s.empty()) return EQCurve::Legacy;
+    // Tolerate both short ("Legacy") and long ("Legacy (single LP)") labels
+    // plus the historical "Cassette_I" / "NAB_15" / etc. forms generated by
+    // the canonical eq_curve_name() output above.
+    if (s.find("Legacy")        != std::string::npos) return EQCurve::Legacy;
+    if (s.find("Cassette I")    != std::string::npos ||
+        s.find("Cassette_I")    != std::string::npos) return EQCurve::Cassette_I;
+    if (s.find("Cassette II")   != std::string::npos ||
+        s.find("Cassette_II")   != std::string::npos) return EQCurve::Cassette_II_IV;
+    if (s.find("NAB 3.75")      != std::string::npos ||
+        s.find("NAB_3_75")      != std::string::npos) return EQCurve::NAB_3_75;
+    if (s.find("NAB 7.5")       != std::string::npos ||
+        s.find("NAB_7_5")       != std::string::npos) return EQCurve::NAB_7_5;
+    if (s.find("IEC 7.5")       != std::string::npos ||
+        s.find("IEC_7_5")       != std::string::npos) return EQCurve::IEC_7_5;
+    if (s.find("NAB 15")        != std::string::npos ||
+        s.find("NAB_15")        != std::string::npos) return EQCurve::NAB_15;
+    if (s.find("IEC 15")        != std::string::npos ||
+        s.find("IEC_15")        != std::string::npos) return EQCurve::IEC_15;
+    if (s.find("AES 30")        != std::string::npos ||
+        s.find("AES_30")        != std::string::npos) return EQCurve::AES_30;
+    return EQCurve::Legacy;  // safe default
+}
 
 // ── 2-pole IIR filter state ───────────────────────────────────────────────────
 struct Biquad {
@@ -131,6 +372,23 @@ inline void butter_lp(float fc_norm, Biquad& bq) {
     bq.a[2] = (1.0f - M_SQRT2 * w + w2) * n;
 }
 
+// ── Butterworth highpass (2-pole) coefficient calculation ─────────────────────
+// Used together with butter_lp to build Linkwitz-Riley 4th-order (LR-4)
+// crossovers — cascade two 2-pole Butterworths of the same family for an
+// in-phase power-complementary split. See MagneticPath::_saturate_bandwise.
+inline void butter_hp(float fc_norm, Biquad& bq) {
+    fc_norm = std::clamp(fc_norm, 1e-4f, 0.4999f);
+    float w  = std::tan(PI * fc_norm);
+    float w2 = w * w;
+    float n  = 1.0f / (1.0f + M_SQRT2 * w + w2);
+    bq.b[0] = n;
+    bq.b[1] = -2.0f * n;
+    bq.b[2] = n;
+    bq.a[0] = 1.0f;
+    bq.a[1] = 2.0f * (w2 - 1.0f) * n;
+    bq.a[2] = (1.0f - M_SQRT2 * w + w2) * n;
+}
+
 // ── Butterworth bandpass coefficient calculation ───────────────────────────────
 inline void butter_bp(float low_norm, float high_norm, Biquad& bq) {
     low_norm  = std::clamp(low_norm,  1e-4f, 0.4998f);
@@ -149,6 +407,57 @@ inline void butter_bp(float low_norm, float high_norm, Biquad& bq) {
     bq.a[0]  = 1.0f;
     bq.a[1]  = 2.0f * (w02 - 1.0f) * n;
     bq.a[2]  = (1.0f - w0/Q + w02) * n;
+}
+
+// ── RBJ shelving-biquad coefficients (Phase 2 standard playback EQ) ──────────
+// Standard R. Bristow-Johnson "cookbook" shelf biquads, used for the
+// NAB/IEC/AES/cassette playback EQ curves in EQCurve. A is the shelf gain
+// (10^(dB/40)); w0 is the shelf corner in radians; Q shapes the overshoot.
+// We canonicalise Q to 0.707 (Butterworth) by default — the standards are
+// first-order, so Q is approximately 1/√2 once the shelf gain is applied.
+//
+// We hand-divide by a0 because the cookbook pre-divided form does not match
+// the dsp_types Biquad layout (which expects a0 == 1 by convention).
+inline void rbj_lowshelf(float fc, float gain_db, float Q, Biquad& bq) {
+    float A     = std::pow(10.0f, gain_db / 40.0f);
+    float w0    = 2.0f * PI * fc / SR_F;
+    float cw0   = std::cos(w0);
+    float sw0   = std::sin(w0);
+    float Qe    = std::max(Q, 0.05f);                 // numeric floor on Q
+    float alpha = sw0 / (2.0f * Qe);
+    float sqrtA = std::sqrt(A);
+
+    float b0 =     A * ((A + 1.0f) - (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha);
+    float b1 =  2.0f * A * ((A - 1.0f) - (A + 1.0f) * cw0);
+    float b2 =     A * ((A + 1.0f) - (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha);
+    float a0 =          (A + 1.0f) + (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha;
+    float a1 =    -2.0f * ((A - 1.0f) + (A + 1.0f) * cw0);
+    float a2 =          (A + 1.0f) + (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha;
+
+    float inv_a0 = 1.0f / a0;
+    bq.b[0] = b0 * inv_a0;  bq.b[1] = b1 * inv_a0;  bq.b[2] = b2 * inv_a0;
+    bq.a[0] = 1.0f;          bq.a[1] = a1 * inv_a0; bq.a[2] = a2 * inv_a0;
+}
+
+inline void rbj_highshelf(float fc, float gain_db, float Q, Biquad& bq) {
+    float A     = std::pow(10.0f, gain_db / 40.0f);
+    float w0    = 2.0f * PI * fc / SR_F;
+    float cw0   = std::cos(w0);
+    float sw0   = std::sin(w0);
+    float Qe    = std::max(Q, 0.05f);
+    float alpha = sw0 / (2.0f * Qe);
+    float sqrtA = std::sqrt(A);
+
+    float b0 =     A * ((A + 1.0f) + (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha);
+    float b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cw0);
+    float b2 =     A * ((A + 1.0f) + (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha);
+    float a0 =          (A + 1.0f) - (A - 1.0f) * cw0 + 2.0f * sqrtA * alpha;
+    float a1 =      2.0f * ((A - 1.0f) - (A + 1.0f) * cw0);
+    float a2 =          (A + 1.0f) - (A - 1.0f) * cw0 - 2.0f * sqrtA * alpha;
+
+    float inv_a0 = 1.0f / a0;
+    bq.b[0] = b0 * inv_a0;  bq.b[1] = b1 * inv_a0;  bq.b[2] = b2 * inv_a0;
+    bq.a[0] = 1.0f;          bq.a[1] = a1 * inv_a0; bq.a[2] = a2 * inv_a0;
 }
 
 // ── Highpass (1-pole DC block) ────────────────────────────────────────────────
@@ -198,3 +507,89 @@ inline float fast_tanh(float x) {
 
 inline float lerp(float a, float b, float t) { return a + (b-a)*t; }
 inline float clamp01(float x) { return x < 0.f ? 0.f : x > 1.f ? 1.f : x; }
+
+// ── Preisach hysteresis LUT (Phase 3 magnetic saturation) ────────────────────
+// Memory-resident 64×64 lookup table that produces a magnetisation value
+// M_out from the current field H_in and the previous sample's magnetisation
+// M_prev. Bilinear interpolation between the 4 nearest table cells. Each
+// oxide gets its own table — shape varies by coercivity (Hc).
+//
+// The simplified form kept here is macroscopic: it doesn't track turning
+// points (a true Preisach integral over α−β densities would), but blends
+// toward the anhysteretic backbone tanh(H) with a coercive weighting
+// `1 - exp(-|H - inv_tanh(M_prev)| / width)` — audibly correct for tape's
+// "thickening" tail without the rigour of the full double integral. See
+// docs/TAPE_PHYSICS_REFACTOR.md §3 for design rationale.
+//
+// Bilinear interpolation; small enough to stay L1-resident (16 KB per oxide).
+// Placed at end of file so it can reference fast_tanh defined immediately
+// above. Pricing uses oxide_presets() (also defined earlier in this header).
+struct PreisachLUT {
+    static constexpr int   SIZE  = 64;     // 64×64 = 4096 floats = 16 KB
+    static constexpr float H_MAX = 3.0f;   // input field range (matches fast_tanh clip)
+    static constexpr float M_MAX = 1.0f;   // magnetisation range (saturation limits)
+
+    float table[SIZE][SIZE];              // M_out indexed by [H_idx][M_idx]
+
+    // Bilinear lookup. Caller passes H, M_prev in roughly [-H_MAX, +H_MAX]
+    // and [-M_MAX, +M_MAX]; values outside are clamped to the boundary.
+    float lookup(float H, float M_prev) const {
+        float ft = std::clamp((H + H_MAX) / (2.0f * H_MAX), 0.0f, 1.0f);
+        float mt = std::clamp((M_prev + M_MAX) / (2.0f * M_MAX), 0.0f, 1.0f);
+        int   fi = (int)(ft * (SIZE - 1));
+        int   mi = (int)(mt * (SIZE - 1));
+        int   fi1 = std::min(fi + 1, SIZE - 1);
+        int   mi1 = std::min(mi + 1, SIZE - 1);
+        float fa  = ft * (SIZE - 1) - fi;
+        float ma  = mt * (SIZE - 1) - mi;
+        float v00 = table[fi ][mi ];
+        float v01 = table[fi ][mi1];
+        float v10 = table[fi1][mi ];
+        float v11 = table[fi1][mi1];
+        return (v00 * (1.0f - ma) + v01 * ma) * (1.0f - fa)
+             + (v10 * (1.0f - ma) + v11 * ma) *      fa;
+    }
+};
+
+// Build a Preisach LUT for the given oxide. The coercive width derives from
+// HC_REF / oxide.Hc — higher coercivity → narrower loop → sharper switching.
+// The anhysteretic backbone is fast_tanh(H); the hysteretic displacement grows
+// with the distance from H-in to the field that would have produced the
+// previous magnetisation through the anhysteretic curve.
+inline PreisachLUT precompute_preisach_lut(const OxideProps& oxide) {
+    PreisachLUT lut{};
+    float width = std::clamp(HC_REF / std::max(oxide.Hc, 1.0f), 0.3f, 2.0f);
+    for (int hi = 0; hi < PreisachLUT::SIZE; ++hi) {
+        float h_norm = (float)hi / (PreisachLUT::SIZE - 1) * 2.0f * PreisachLUT::H_MAX
+                      - PreisachLUT::H_MAX;
+        float m_anh  = fast_tanh(h_norm);                            // anhysteretic backbone
+        for (int mi = 0; mi < PreisachLUT::SIZE; ++mi) {
+            float m_p    = (float)mi / (PreisachLUT::SIZE - 1) * 2.0f * PreisachLUT::M_MAX
+                         - PreisachLUT::M_MAX;
+            float m_p_cl = std::clamp(m_p, -0.9999f, 0.9999f);
+            float inv_an = std::atanh(m_p_cl);                       // field that would give m_p through anhyst
+            float dist   = std::abs(h_norm - inv_an);
+            float w      = 1.0f - std::exp(-dist / (width + 1e-3f));
+            // M_out: previous magnetisation + (anhysteretic - previous) * coercive weight
+            lut.table[hi][mi] = m_p + (m_anh - m_p) * w;
+        }
+    }
+    return lut;
+}
+
+// Lazy-built registry of Preisach LUTs, one per oxide key. Same shape as
+// oxide_presets(): keyed by the same string, populated on first call.
+// Total footprint on 10 oxides: 160 KB; each lookup table is L1-resident
+// during sustained use thanks to the running MagneticPath keeping only the
+// currently-selected oxide's table hot.
+inline const std::unordered_map<std::string, PreisachLUT>& preisach_luts() {
+    static const std::unordered_map<std::string, PreisachLUT> P = []() {
+        std::unordered_map<std::string, PreisachLUT> M;
+        M.reserve(oxide_presets().size());
+        for (const auto& kv : oxide_presets()) {
+            M.emplace(kv.first, precompute_preisach_lut(kv.second));
+        }
+        return M;
+    }();
+    return P;
+}

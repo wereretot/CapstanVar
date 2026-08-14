@@ -57,6 +57,7 @@ enum class ErrCode {
     PRESET_IMPORT_NOT_FOUND,
     PRESET_IMPORT_PARSE_FAILED,
     PRESET_IMPORT_WRONG_APP,
+    PRESET_FORMAT_UNKNOWN,    // preset's format_id did not resolve in catalog
 
     // Engine / DSP
     ENGINE_TRANSPORT_NO_SPEEDS,
@@ -69,6 +70,7 @@ inline ErrSeverity err_code_severity(ErrCode c) {
     case ErrCode::AUDIO_DSP_END_OF_FILE:
     case ErrCode::RENDER_CANCELLED:
     case ErrCode::PROJECT_AUDIO_NOT_FOUND:
+    case ErrCode::PRESET_FORMAT_UNKNOWN:
         return ErrSeverity::Warning;
     default:
         return ErrSeverity::Error;
@@ -100,6 +102,7 @@ inline const char* err_code_str(ErrCode c) {
     case ErrCode::PRESET_IMPORT_NOT_FOUND:     return "PRESET_IMPORT_NOT_FOUND";
     case ErrCode::PRESET_IMPORT_PARSE_FAILED:  return "PRESET_IMPORT_PARSE_FAILED";
     case ErrCode::PRESET_IMPORT_WRONG_APP:     return "PRESET_IMPORT_WRONG_APP";
+    case ErrCode::PRESET_FORMAT_UNKNOWN:       return "PRESET_FORMAT_UNKNOWN";
     case ErrCode::ENGINE_TRANSPORT_NO_SPEEDS:  return "ENGINE_TRANSPORT_NO_SPEEDS";
     case ErrCode::ENGINE_OVERSAMPLE_ALLOC:     return "ENGINE_OVERSAMPLE_ALLOC";
     }

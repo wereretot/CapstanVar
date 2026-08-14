@@ -141,9 +141,12 @@ void TapeEngine::_saturate_oversampled(Frame* buf, int frames, int oversample,
     _os_context.assign(buf + frames - OS_PAD, buf + frames);
     _os_context_valid = true;
 
-    // Saturate at high sample rate
+    // Saturate at high sample rate. Pass oversample so MagneticPath can
+    // cook its 4-band LR-4 crossovers at the effective sample rate, keeping
+    // canonical 200 Hz / 1.5 kHz / 6 kHz splits when summed with the OS-
+    // rate data buffer (Phase 3).
     int sat_n = pad_out + up_n;
-    magnetic.saturate_only(up.data(), sat_n, p);
+    magnetic.saturate_only(up.data(), sat_n, p, oversample);
 
     // Downsample (averaging decimation)
     for (int i = 0; i < frames; ++i) {
@@ -187,6 +190,24 @@ bool TapeEngine::dsp_process(Frame* out, int frames, int oversample) {
 
     EngineParams p = params;
     p.is_reversed  = is_reversed;
+
+    // Phase 5b — EnvironmentModule sits at the top of the chain. It
+    // accumulates env_age_seconds / recomputes env_tape_health /
+    // applies the per-field damage floors + thermal offsets +
+    // multiplicative bias drift, then overwrites `p` in place so the
+    // downstream modules (transport / magnetic / electronics) see the
+    // effective values without their signatures changing. After the
+    // call the two PERSISTED fields (env_age_seconds, env_tape_health)
+    // are written back to engine.params under the same lock so the
+    // GUI's wear progress bar reflects the freshly-accumulated wear
+    // on the next render frame. env_failure_modes is NOT written back
+    // here because process() passes it through verbatim — the GUI's
+    // TRIGGER BREAK path owns that field. See
+    // docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 wiring".
+    p = env.process(p, frames);
+    params.env_age_seconds = p.env_age_seconds;
+    params.env_tape_health = p.env_tape_health;
+
     // When tape is moving, keep engage target = 1.0 so TransportDynamics
     // internal ramp reaches full speed quickly. tape_speed_mult carries
     // the actual inertia — no double-ramping.
@@ -393,6 +414,34 @@ std::unique_ptr<TapeEngine> TapeEngine::make_worker(
     int warmup_samples = n_warmup_blocks * block_size;
     eng->transport.motor_engage        = 1.f;
     eng->transport.current_motor_speed = 1.f;
+
+    // ── Fast-forward env_age_seconds to natural continuous value ────────
+    // env_age_seconds tracks wall-clock-equivalent sim-seconds of tape
+    // playback. The natural value at any slice start_sample is
+    //     master  +  elapsed_to_start × dt_factor
+    // where elapsed_to_start is samples consumed so far (FORWARD:
+    // start_sample; REVERSE: total_samples − start_sample), and
+    // dt_factor is α × temp_rate × hum_rate / SR (constant per render).
+    // The audio warmup below advances env_age_seconds naturally through
+    // warmup_samples of conditioning, so we separately tick env.process
+    // through the (elapsed_to_start − warmup_samples) of "logical time"
+    // that precedes the audio warmup. Result: each slice worker enters
+    // its real processing with env_age_seconds at exactly the value that
+    // continuous playback would produce, eliminating per-chunk reset.
+    //
+    // env.process mutates only `p.env_age_seconds` and `p.env_tape_health`
+    // on the in/out EngineParams; per-field damage floors go through the
+    // returned copy and get re-applied during the audio path.
+    {
+        const double elapsed_to_start = eng->is_reversed
+            ? (double)(eng->total_samples - start_sample)
+            : (double)start_sample;
+        const int prefetch = std::max(0, (int)(elapsed_to_start - (double)warmup_samples));
+        const int n_full_blocks = prefetch / block_size;
+        for (int i = 0; i < n_full_blocks; ++i) {
+            eng->env.process(eng->params, block_size);
+        }
+    }
 
     std::vector<Frame> discard(block_size);
     if (!eng->is_reversed) {

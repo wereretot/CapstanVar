@@ -125,6 +125,7 @@ set(APP_SOURCES
     src/mod_transport.cpp
     src/mod_magnetic.cpp
     src/mod_electronics.cpp
+    src/mod_environment.cpp
     src/audio_io.cpp
     src/preset_manager.cpp
     src/ui.cpp

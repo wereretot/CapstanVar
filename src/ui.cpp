@@ -11,6 +11,7 @@ namespace fs = std::filesystem;
 #include <algorithm>
 #include <string>
 #include "key_bindings.hpp"
+#include "mod_environment.hpp"   // Phase 5 — storage_profiles(), env_constants::*
 
 #ifdef NAGRA_HAS_TFD
 #include <tinyfiledialogs.h>
@@ -428,6 +429,27 @@ void CapstanApp::_draw_frame() {
     // Compute display params: base + curves (for slider visual feedback).
     // Also push animated values to engine every frame during playback.
     _display_params = _ui_params;
+    // Phase 5b fix — env_age_seconds and env_tape_health are ENGINE-OWNED
+    // (the audio thread accumulates them in dsp_process). Read them back
+    // under engine.lock AFTER the _ui_params copy so the Environment tab
+    // shows live values instead of struct defaults. Without this read-back,
+    // _draw_frame's downstream _anim block (and _sync_params) would post
+    // _ui_params.env_age_seconds (always 0.0) back to the engine — clobbering
+    // the freshly-accumulated value every UI frame at 60 Hz, faster than
+    // the audio thread (43 Hz) could increment it. Net: env_age_seconds
+    // oscillates between 0.0 and ~0.02 sim-sec, user sees 'it doesn't age'.
+    // Mirror into BOTH _display_params (sliders/animation path) and
+    // _ui_params (the Phase 5d env tab body added in commit 5e63174 reads
+    // directly from _ui_params). Safe to write _ui_params here because
+    // _sync_params no longer posts env_age_seconds/env_tape_health back
+    // to the engine.
+    {
+        std::lock_guard<std::mutex> g(_engine.lock);
+        _ui_params.env_age_seconds       = _engine.params.env_age_seconds;
+        _ui_params.env_tape_health       = _engine.params.env_tape_health;
+        _display_params.env_age_seconds = _engine.params.env_age_seconds;
+        _display_params.env_tape_health = _engine.params.env_tape_health;
+    }
     if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load()) {
         _anim.apply(_display_params, _engine.play_head);
         std::lock_guard<std::mutex> g(_engine.lock);
@@ -445,6 +467,19 @@ void CapstanApp::_draw_frame() {
         ep.mains_hum=_display_params.mains_hum; ep.cutoff_base=_display_params.cutoff_base;
         ep.head_bump=_display_params.head_bump; ep.azimuth_drift=_display_params.azimuth_drift;
         ep.sticky_shed=_display_params.sticky_shed; ep.oxide_type=_display_params.oxide_type;
+        ep.eq_curve=_display_params.eq_curve; ep.lf_trim_db=_display_params.lf_trim_db;
+        ep.hf_trim_db=_display_params.hf_trim_db; ep.format_id=_display_params.format_id;
+        ep.format_locked=_display_params.format_locked;
+        // Phase 5 — Environment & aging. user-controllable axes (temp, hum,
+        // α) flow UI → engine via _display_params. env_age_seconds and
+        // env_tape_health are ENGINE-OWNED: do NOT post them here or you'll
+        // stomp the freshly-accumulated values back to 0 at 60 fps.
+        // env_failure_modes is owned by the GUI's TRIGGER BREAK path; that
+        // path is exercised in another code path that writes directly to
+        // _engine.params under the lock, not via _display_params here.
+        ep.env_temperature_c     = _display_params.env_temperature_c;
+        ep.env_humidity_pct      = _display_params.env_humidity_pct;
+        ep.env_age_acceleration  = _display_params.env_age_acceleration;
     }
 
     // ── Tabs — fixed height that leaves exactly TRANSPORT_H + margins at bottom
@@ -749,6 +784,7 @@ void CapstanApp::_draw_tabs() {
     if (ImGui::BeginTabItem("  Transport Mechanics  ")) { _draw_transport_tab(); ImGui::EndTabItem(); }
     if (ImGui::BeginTabItem("  Magnetic Flux  "))       { _draw_magnetic_tab();  ImGui::EndTabItem(); }
     if (ImGui::BeginTabItem("  Electronics & Wear  "))  { _draw_electronics_tab(); ImGui::EndTabItem(); }
+    if (ImGui::BeginTabItem("  Environment  "))         { _draw_environment_tab(); ImGui::EndTabItem(); }
     ImGui::EndTabBar();
 }
 
@@ -790,10 +826,105 @@ void CapstanApp::_draw_magnetic_tab() {
 }
 void CapstanApp::_draw_electronics_tab() {
     ImGui::BeginChild("##es",{0,0},false); bool c=false;
+
+    // ── FORMAT (Phase 2) ──────────────────────────────────────────────────────────
+    // Picking a canonical format snaps ips, EQ curve, oxide, and bias to its
+    // MRL-derived defaults and locks those fields (format_locked = true).
+    // Touching any of the coupled knobs detaches (sets format_locked = false)
+    // and the label flips to 'Custom'.
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::purple);
+    ImGui::TextUnformatted("FORMAT");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    ImGui::Text("Tape Format:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(300);
+    const char* fmt_preview = "── Custom (no coupling) ──";
+    if (!_ui_params.format_id.empty()) {
+        if (auto* f = tape_format_by_id(_ui_params.format_id)) fmt_preview = f->display_name.c_str();
+    }
+    if (ImGui::BeginCombo("##format_id", fmt_preview)) {
+        if (ImGui::Selectable("── Custom (no coupling) ──", _ui_params.format_id.empty())) {
+            _ui_params.format_id = "";
+            _ui_params.format_locked = false;
+            c = true;
+        }
+        for (auto& tf : tape_formats()) {
+            bool sel = (_ui_params.format_id == tf.id);
+            if (ImGui::Selectable(tf.display_name.c_str(), sel)) {
+                _ui_params.format_id     = tf.id;
+                _ui_params.format_locked = true;
+                _ui_params.ips_base      = tf.ips;
+                _ui_params.eq_curve      = tf.eq_curve;
+                _ui_params.oxide_type    = tf.oxide;
+                _ui_params.bias          = tf.bias_recommend;
+                c = true;
+            }
+            if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    if (_ui_params.format_locked) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::cyan);
+        ImGui::TextUnformatted("  [locked: eq + oxide + ips + bias coupled]");
+        ImGui::PopStyleColor();
+    } else if (!_ui_params.format_id.empty()) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::orange);
+        ImGui::TextUnformatted("  [overridden — Custom]");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
+
+    // ── EQ CURVE ─────────────────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::purple);
+    ImGui::TextUnformatted("EQUALISATION");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    ImGui::Text("EQ Curve:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::BeginCombo("##eq_curve", eq_curve_name(_ui_params.eq_curve))) {
+        for (int i = 0; i <= (int)EQCurve::AES_30; ++i) {
+            auto curve = (EQCurve)i;
+            bool selected = (_ui_params.eq_curve == curve);
+            if (ImGui::Selectable(eq_curve_name(curve), selected)) {
+                _ui_params.eq_curve = curve;
+                if (!_ui_params.format_id.empty())
+                    _ui_params.format_locked = false;
+                c = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    // When Eq is Legacy: show the cutoff_base LP slider (audible unchanged path).
+    // When Eq is non-Legacy: show LF / HF trim sliders that add on top of the
+    // implicit ±3 dB shelf gains baked into the RBJ curve.
+    if (_ui_params.eq_curve == EQCurve::Legacy) {
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+        ImGui::TextUnformatted("(Legacy single-LP path — cutoff_base drives bandwidth)");
+        ImGui::PopStyleColor();
+        c|=_aslider("cut",  "AZIMUTH CUTOFF (Hz)",      _ui_params.cutoff_base, 500.f,22000.f,Col::purple,"Head gap bandwidth. Legacy single LP path.");
+    } else {
+        EQSpec spec = eq_spec(_ui_params.eq_curve);
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+        ImGui::Text("Standard: %.0f Hz LF shelf, %.2f kHz HF shelf",
+                    1.f / (TWO_PI * spec.lf_tau_s),
+                    1.f / (TWO_PI * spec.hf_tau_s) * 1e-3f);
+        ImGui::PopStyleColor();
+        c|=_aslider("lftrim","LF TRIM (dB)",            _ui_params.lf_trim_db, -6.f, 6.f, Col::purple,
+                    "Additional LF shelf gain on top of the standard curve's LF shelf gain.");
+        c|=_aslider("hftrim","HF TRIM (dB)",            _ui_params.hf_trim_db, -6.f, 6.f, Col::purple,
+                    "Additional HF shelf gain on top of the standard curve's HF shelf gain.");
+    }
+    ImGui::Spacing();
+
     c|=_aslider("hiss",   "NOISE FLOOR",               _ui_params.hiss,          0.f,  0.02f,  Col::purple,"Broadband white noise from preamp/oxide.");
     c|=_aslider("hcol",   "HISS COLOUR (PINK TILT)",   _ui_params.hiss_color,    0.f,  1.f,    Col::purple,"1/f noise colouring from preamp transistors.");
     c|=_aslider("hum",    "60Hz MAINS HUM",            _ui_params.mains_hum,     0.f,  0.05f,  Col::purple,"AC supply at 60/120/180/240 Hz.");
-    c|=_aslider("cut",    "AZIMUTH CUTOFF (Hz)",       _ui_params.cutoff_base,   500.f,22000.f,Col::purple,"Head gap bandwidth.");
     c|=_aslider("bump",   "HEAD BUMP (LF EQ)",         _ui_params.head_bump,     0.f,  5.f,    Col::purple,"Head resonance boosting 50-200 Hz.");
     c|=_aslider("azdrift","AZIMUTH PHASE DRIFT",       _ui_params.azimuth_drift, 0.f,  1.f,    Col::purple,"Head angle error: HF phase diff between channels.");
     c|=_aslider("sticky", "STICKY SHED INTENSITY",     _ui_params.sticky_shed,   0.f,  1.f,    Col::purple,"Binder absorption: squeal, drag, HF loss.");
@@ -1797,6 +1928,14 @@ void CapstanApp::_draw_notifications() {
                 text_col = IM_COL32(255,180,180,255);
                 bg_col   = IM_COL32(80,20,20,200);
                 break;
+            default:
+                // Neutral grey for any unrecognised severity (e.g., a future
+                // enum value). Mirrors the "?" / reset fallback used by
+                // err_severity_icon() and err_severity_color().
+                icon_col = IM_COL32(160,160,170,255);
+                text_col = IM_COL32(200,200,210,255);
+                bg_col   = IM_COL32(45,45,55,200);
+                break;
             }
             
             // Background
@@ -1879,14 +2018,59 @@ void CapstanApp::_sync_params() {
     ep.mains_hum=_ui_params.mains_hum; ep.cutoff_base=_ui_params.cutoff_base;
     ep.head_bump=_ui_params.head_bump; ep.azimuth_drift=_ui_params.azimuth_drift;
     ep.sticky_shed=_ui_params.sticky_shed; ep.oxide_type=_ui_params.oxide_type;
+    // Phase 2 — EQ curves + format-id coupling
+    ep.eq_curve      = _ui_params.eq_curve;
+    ep.lf_trim_db    = _ui_params.lf_trim_db;
+    ep.hf_trim_db    = _ui_params.hf_trim_db;
+    ep.format_id     = _ui_params.format_id;
+    ep.format_locked = _ui_params.format_locked;
+    // Phase 5 — Environment & aging. user-controllable axes (temp, hum,
+    // α) flow UI → engine. env_age_seconds and env_tape_health are
+    // ENGINE-OWNED and must NOT be posted here — the audio thread
+    // accumulates them in dsp_process; writing _ui_params.env_age_seconds
+    // back to the engine on every ui slider touch would clobber the
+    // accumulator. env_failure_modes is owned by the GUI's TRIGGER BREAK
+    // path (separate write site under the same lock) and is intentionally
+    // not pushed here either.
+    ep.env_temperature_c     = _ui_params.env_temperature_c;
+    ep.env_humidity_pct      = _ui_params.env_humidity_pct;
+    ep.env_age_acceleration  = _ui_params.env_age_acceleration;
     // Apply curves on top if playing
     if (_anim.enabled && !_anim.curves.empty() && _engine.is_playing.load())
         _anim.apply(ep, _engine.play_head);
     _project_dirty = true;
 }
 
-void CapstanApp::_apply_preset(const EngineParams& p, const std::string&) {
-    _ui_params = p;
+void CapstanApp::_apply_preset(const EngineParams& p, const std::string& name) {
+    // Phase 5b polish — preserve wear across preset apply. The whole-struct
+    // _ui_params = p copy below would reset _ui_params.env_age_seconds and
+    // _ui_params.env_tape_health to whatever the preset carries (struct
+    // default 0.0 / 1.0 for storage presets). The per-frame readback in
+    // _draw_frame self-heals on the next UI frame, but the one-frame zero
+    // flash is observable. Monotonic union preserves the larger of the
+    // incoming value and the live wear so saved-restore from a .cvpr still
+    // wins (incoming 1.5 -> refresh wins; incoming 0.0 -> existing 14.2
+    // wins), matching Phase 5c verify_storage_preset_round_trip intent that
+    // storage presets do not reset wear.
+    EngineParams p_in = p;
+    p_in.env_age_seconds = std::max(p_in.env_age_seconds, _ui_params.env_age_seconds);
+    p_in.env_tape_health = std::min(p_in.env_tape_health, _ui_params.env_tape_health);
+    _ui_params = p_in;
+    // Phase 4 fix: validate format_id at every EngineParams arrival path.
+    // ep_from_json() guards the JSON-import path; this catches project-load
+    // (load_project copies EngineParams directly via _apply_preset), session
+    // presets, and any other path that bypasses ep_from_json. Stale ids
+    // (left over from pre-Phase-4 catalog renames) clear + warn so the UI
+    // shows "Custom (no coupling)" instead of a stale locked badge.
+    if (!_ui_params.format_id.empty() &&
+        !tape_format_by_id(_ui_params.format_id)) {
+        CV_ERR(PRESET_FORMAT_UNKNOWN,
+               "preset \u2018" + (name.empty() ? std::string{"(unnamed)"} : name) +
+               "\u2019 references unknown format_id \u2018" + _ui_params.format_id +
+               "\u2019 \u2014 clearing");
+        _ui_params.format_id.clear();
+        _ui_params.format_locked = false;
+    }
     _sync_params();
     _engine.trigger_fade_in(512);
 }
@@ -2163,4 +2347,315 @@ void CapstanApp::_toggle_ff() {
         return; 
     }
     _audio.shuttle_ff(10.f);  // Start at 10x
+}
+// ── Environment tab (Phase 5d) ──────────────────────────────────────────────────
+// UI surface for the env module. Mirrors the locked design in
+// docs/TAPE_PHYSICS_REFACTOR.md §X "Phase 5 failure-mode catalog" +
+// docs/PRESET_SCHEMA.md §"Option (a) instant-override preservation".
+//
+//   - Storage combo at the top \u2014 picks only set (T_c, RH); wear state is
+//     preserved (storage profile change does NOT reset age/health/bit-set).
+//   - Three sliders: temperature, humidity, age acceleration (linear 0.1..\u221e).
+//   - Wear readouts: accumulated age formatted by magnitude; tape-health
+//     bar with green\u2192amber\u2192red gradient (1-px segments).
+//   - Failure modes: 7 checkboxes bound to env_failure_modes bit-set so
+//     a user can pin a specific mode without invoking TRIGGER (option A).
+//   - TRIGGER BREAK walks the catalog top\u2192bottom (MAGNETISATION_LOSS first)
+//     and fires the highest-ranked mode whose preconditions hold. Audit\n     logged to stderr so the trail is greppable from CI / stdout-stderr\n     capture.\n//   - RESET TAPE clears accumulated age, tape health, and failure-mode\n//     bit-set; storage profile / \u03b1 / temperature / humidity are NOT reset.
+void CapstanApp::_draw_environment_tab() {
+    ImGui::BeginChild("##es_env", {0,0}, false);
+    bool c = false;
+
+    // \u2500\u2500 Storage profile (Phase 5c) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::cyan);
+    ImGui::TextUnformatted("STORAGE PROFILE");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    // Active-profile detection: T_c and RH_pct match a profile within
+    // 0.05-tolerance. Auto-detect (no explicit _storage_idx state) so a
+    // hand edit to a slider detaches the combo preview back to "Custom".
+    int active_idx = -1;
+    auto& profs = storage_profiles();
+    for (int i = 0; i < (int)profs.size(); ++i) {
+        if (std::fabs(_ui_params.env_temperature_c - profs[i].env_temperature_c) < 0.05f &&
+            std::fabs(_ui_params.env_humidity_pct    - profs[i].env_humidity_pct)   < 0.05f) {
+            active_idx = i;
+            break;
+        }
+    }
+    const char* preview = (active_idx >= 0) ? profs[active_idx].display_name
+                                            : "\u2500\u2500 Custom \u2500\u2500";
+    ImGui::SetNextItemWidth(360);
+    if (ImGui::BeginCombo("##storage_profile", preview)) {
+        if (ImGui::Selectable("\u2500\u2500 Custom \u2500\u2500", active_idx < 0)) {
+            // Detach: leave T_c / RH untouched. Wear state preserved.
+        }
+        for (int i = 0; i < (int)profs.size(); ++i) {
+            bool sel = (active_idx == i);
+            if (ImGui::Selectable(profs[i].display_name, sel)) {
+                _ui_params.env_temperature_c = profs[i].env_temperature_c;
+                _ui_params.env_humidity_pct   = profs[i].env_humidity_pct;
+                c = true;
+            }
+            if (sel) ImGui::SetItemDefaultFocus();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", profs[i].description);
+        }
+        ImGui::EndCombo();
+    }
+    if (active_idx >= 0) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::cyan);
+        ImGui::TextUnformatted("  [profile active]");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::orange);
+        ImGui::TextUnformatted("  [overridden \u2014 Custom]");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
+
+    // \u2500\u2500 Sliders (Phase 5) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::amber);
+    ImGui::TextUnformatted("ENVIRONMENT");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    c |= _aslider("env_t",   "TEMPERATURE (\u00b0C)",           _ui_params.env_temperature_c,    0.f,    60.f,    Col::amber,  "Ambient \u00b0C. Doubles env rate every +10\u00b0C above reference (Arrhenius); below 10\u00b0C slows aging. Reference: 20 \u00b0C.");
+    c |= _aslider("env_rh",  "HUMIDITY (% RH)",                 _ui_params.env_humidity_pct,     0.f,    100.f,   Col::cyan,   "Relative humidity. Linear above 50%, quadratic surcharge above 70%. Below 50% damps the ageing axis. Reference: 50%.");
+    c |= _aslider("env_a",   "AGE ACCELERATION (\u03b1)",        _ui_params.env_age_acceleration, 0.1f,   10000.f, Col::purple, "Wall-clock \u00d7 \u03b1 = sim-age. \u03b1=1 matches real time; \u03b1=1000 reaches audible Hot Attic thresholds in ~23 wall-hours.");
+    ImGui::Spacing();
+
+    // \u2500\u2500 Wear state readouts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::green);
+    ImGui::TextUnformatted("WEAR STATE");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    const double age_s = _ui_params.env_age_seconds;
+    const float  age_y = (float)(age_s / env_constants::kSecondsPerYear);
+    const float  h     = _ui_params.env_tape_health;
+
+    char age_buf[64];
+    if      (age_s <    60.0)  std::snprintf(age_buf, sizeof(age_buf), "%.1f s",                  age_s);
+    else if (age_s <  3600.0)  std::snprintf(age_buf, sizeof(age_buf), "%d m %d s",               (int)(age_s/60), (int)age_s%60);
+    else if (age_s < 86400.0)  std::snprintf(age_buf, sizeof(age_buf), "%.1f hours",              age_s/3600.0);
+    else if (age_s < env_constants::kSecondsPerYear)
+                              std::snprintf(age_buf, sizeof(age_buf), "%.2f days",               age_s/86400.0);
+    else                       std::snprintf(age_buf, sizeof(age_buf), "%.2f sim-yr (%.0f days)", age_y,      (float)(age_s/86400.0));
+
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+    ImGui::Text("ACCUMULATED AGE: %s", age_buf);
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("exp(-age_yr / %.1f yr) \u2014 kEnvHalfLifeYears pinned at compile time", env_constants::kEnvHalfLifeYears);
+
+    ImGui::Spacing();
+
+    // Tape-health bar \u2014 hand-drawn green\u2192amber\u2192red gradient.
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::grey_lt);
+    ImGui::Text("TAPE HEALTH:");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImVec4 health_col = (h > 0.7f) ? Col::green : (h > 0.4f ? Col::amber : Col::red);
+    ImGui::PushStyleColor(ImGuiCol_Text, health_col);
+    ImGui::Text(" %.0f%%", h * 100.f);
+    ImGui::PopStyleColor();
+    {
+        ImVec2 p0    = ImGui::GetCursorScreenPos();
+        float  bar_w = ImGui::GetContentRegionAvail().x;
+        float  bar_h = 14.f;
+        auto*  dl    = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p0, {p0.x + bar_w, p0.y + bar_h},
+                          IM_COL32(40, 40, 50, 255), 3.f);
+        if (h > 0.f) {
+            // 1-px segments, green\u2192amber\u2192red, drawn left\u2192right across the
+            // bar; fill proportional to h. Up to 480 segments for a smooth
+            // gradient on wide tabs.
+            const float seg_w  = std::max(1.f, bar_w / 480.f);
+            const int   n_full = (int)(h * (bar_w / seg_w));
+            for (int i = 0; i < n_full; ++i) {
+                float t = (float)i / 479.f;        // 0..1 across the full bar
+                ImU32 col;
+                if (t < 0.5f) {
+                    float s = t * 2.f;
+                    col = IM_COL32(
+                        (int)(57 + 198 * s),
+                        255,
+                        (int)(57 * (1.f - s) + 80 * s),
+                        255);
+                } else {
+                    float s = (t - 0.5f) * 2.f;
+                    col = IM_COL32(
+                        255,
+                        (int)(255 - 200 * s),
+                        50,
+                        255);
+                }
+                float x0 = p0.x + i * seg_w;
+                dl->AddRectFilled(
+                    {x0, p0.y},
+                    {x0 + seg_w + 0.5f, p0.y + bar_h},
+                    col);
+            }
+        }
+        dl->AddRect(p0, {p0.x + bar_w, p0.y + bar_h},
+                    IM_COL32(85, 85, 115, 200), 3.f, 0, 1.f);
+        ImGui::Dummy({bar_w, bar_h});
+    }
+    ImGui::Spacing();
+
+    // \u2500\u2500 Failure-mode bit-set (Phase 5) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    ImGui::PushStyleColor(ImGuiCol_Text, Col::red);
+    ImGui::TextUnformatted("FAILURE MODES");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    struct FM { TapeFailureMode mode; const char* label; const char* tip; };
+    static const FM modes[] = {
+        {TapeFailureMode::MOLD,               "MOLD (mould, high humidity)",
+         "RH \u2265 70% on a tape that has sim-time (auto)."},
+        {TapeFailureMode::EDGE_PEEL,          "EDGE_PEEL (humid + old)",
+         "age \u00d7 temp_rate above reference (auto)."},
+        {TapeFailureMode::CREASE,             "CREASE (sticky shed + crease)",
+         "TRIGGER-only when sticky_shed \u2265 0.9 (manual gate)."},
+        {TapeFailureMode::STRETCHED,          "STRETCHED (tension + age)",
+         "tension_load \u2265 0.10 on aged tape (auto)."},
+        {TapeFailureMode::CHEM_DEATH,         "CHEM_DEATH (binder breakdown)",
+         "age on hot tape (auto) \u2014 exp((T-20)/8) \u00d7 age_yr > 0."},
+        {TapeFailureMode::SNAP,               "SNAP (tape dead)",
+         "TRIGGER-only when env_tape_health < 0.1 (manual gate)."},
+        {TapeFailureMode::MAGNETISATION_LOSS, "MAGNETISATION_LOSS (long-term / hot)",
+         "age_yr \u00d7 exp((T_c-20)/12) \u2265 30 (auto)."},
+    };
+    uint32_t fm = _ui_params.env_failure_modes;
+    for (auto& m : modes) {
+        uint32_t bit = (uint32_t)m.mode;
+        bool on = (fm & bit) != 0u;
+        if (ImGui::Checkbox(m.label, &on)) {
+            if (on)  fm |= bit;
+            else     fm &= ~bit;
+            _ui_params.env_failure_modes = fm;
+            c = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m.tip);
+    }
+    if (fm == 0u) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, Col::grey);
+        ImGui::TextUnformatted("  [PRISTINE]");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
+
+    // \u2500\u2500 TRIGGER BREAK \u2014 walks catalog top\u2192bottom, fires highest-ranked applicable.
+    if (_col_button("  TRIGGER BREAK  ", Col::red_dim, Col::red, 200)) {
+        // Evaluate every precondition ONCE on the _ui_params snapshot.
+        // The audio-thread env module will re-evaluate on the next
+        // dsp_process pass and seed effective_p accordingly, so the math
+        // here matches what the env module actually uses.
+        const float  age_y_l   = (float)(_ui_params.env_age_seconds / env_constants::kSecondsPerYear);
+        const float  T_c       = _ui_params.env_temperature_c;
+        const float  RH        = _ui_params.env_humidity_pct;
+        const float  drift     = std::pow(2.0f, (T_c - 20.f) / 10.f);          // temp_rate
+        const float  hslope    = std::pow(2.0f, (T_c - 20.f) / 12.f);          // MAGNETISATION_LOSS curve
+        // Re-derive sticky_shed envy of the env module's formula for CREASE gate:
+        const float  sticky_e  = std::min(1.0f,
+            std::exp((T_c - 20.f) / 8.f) *
+            std::max(0.0f,
+                std::max(0.0f, (RH - 50.f) / 50.f) +
+                std::pow(std::max(0.0f, (RH - 70.f) / 30.f), 2.f)) *
+            (age_y_l / 2.0f));
+        const float  sticky_v  = std::max(_ui_params.sticky_shed, sticky_e);
+
+        // Walk catalog highest\u2192lowest (MAGNETISATION_LOSS first). First\n eligible is fired.
+        static const TapeFailureMode order[] = {
+            TapeFailureMode::MAGNETISATION_LOSS,
+            TapeFailureMode::SNAP,
+            TapeFailureMode::CHEM_DEATH,
+            TapeFailureMode::STRETCHED,
+            TapeFailureMode::CREASE,
+            TapeFailureMode::EDGE_PEEL,
+            TapeFailureMode::MOLD,
+        };
+        bool fired = false;
+        for (auto m : order) {
+            bool eligible = false;
+            const char* why = "";
+            switch (m) {
+                case TapeFailureMode::MAGNETISATION_LOSS:
+                    eligible = (age_y_l * hslope) >= 30.f;
+                    why = "age \u00d7 exp((T-20)/12) \u2265 30";
+                    break;
+                case TapeFailureMode::SNAP:
+                    eligible = _ui_params.env_tape_health < 0.1f;
+                    why = "tape_health < 0.1";
+                    break;
+                case TapeFailureMode::CHEM_DEATH:
+                    eligible = (age_y_l > 0.f) && (T_c > 20.f);
+                    why = "age > 0 and T > 20 (\u00b0C)";
+                    break;
+                case TapeFailureMode::STRETCHED:
+                    eligible = (age_y_l > 0.f) && (_ui_params.tension_load >= 0.10f);
+                    why = "tension_load \u2265 0.10 \u00d7 sim-time";
+                    break;
+                case TapeFailureMode::CREASE:
+                    eligible = sticky_v >= 0.9f;
+                    why = "sticky_shed \u2265 0.9";
+                    break;
+                case TapeFailureMode::EDGE_PEEL:
+                    eligible = (age_y_l > 0.f) && (drift > 1.f);
+                    why = "age > 0 and temperature above reference";
+                    break;
+                case TapeFailureMode::MOLD:
+                    eligible = (age_y_l > 0.f) && (RH >= 70.f);
+                    why = "RH \u2265 70% \u00d7 sim-time";
+                    break;
+                default: break;
+            }
+            if (eligible) {
+                _ui_params.env_failure_modes |= (uint32_t)m;
+                std::fprintf(stderr,
+                    "[ui:env] TRIGGER BREAK fired mode=%u (%s) \u2014 bit now set in env_failure_modes\n",
+                    (uint32_t)m, why);
+                fired = true;
+                break;
+            }
+        }
+        if (!fired) {
+            std::fprintf(stderr,
+                "[ui:env] TRIGGER BREAK: no applicable mode (age_y=%.3f, T=%.1f, RH=%.1f, health=%.3f, tension=%.3f, sticky=%.3f)\n",
+                age_y_l, T_c, RH, _ui_params.env_tape_health, _ui_params.tension_load, sticky_v);
+        }
+        c = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Walks the failure-mode catalog top\u2192bottom (MAGNETISATION_LOSS first) and fires the highest-ranked mode whose eligibility preconditions hold. Audit-trail logged to stderr.");
+
+    ImGui::SameLine();
+    if (_col_button("  RESET TAPE  ", Col::bg3, Col::grey_lt, 140)) {
+        const double   reset_age   = 0.0;
+        const float    reset_hlth  = 1.0f;
+        const uint32_t reset_fail  = 0u;
+        _ui_params.env_age_seconds        = reset_age;
+        _ui_params.env_tape_health        = reset_hlth;
+        _ui_params.env_failure_modes      = reset_fail;
+        _display_params.env_age_seconds   = reset_age;
+        _display_params.env_tape_health   = reset_hlth;
+        _display_params.env_failure_modes = reset_fail;
+        {
+            std::lock_guard<std::mutex> g(_engine.lock);
+            _engine.params.env_age_seconds   = reset_age;
+            _engine.params.env_tape_health   = reset_hlth;
+            _engine.params.env_failure_modes = reset_fail;
+        }
+        std::fprintf(stderr, "[ui:env] RESET TAPE \u2014 wear cleared (age=0, health=1.0, failure_modes=0).\n");
+        c = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Clears env_age_seconds, env_tape_health, and env_failure_modes. Storage profile / temperature / humidity / \u03b1 are NOT reset \u2014 use the sliders or storage combo to change them.");
+
+    if (c) _sync_params();
+    ImGui::EndChild();
 }
