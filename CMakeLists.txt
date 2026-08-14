@@ -200,15 +200,22 @@ add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES})
 target_compile_definitions(CapstanVar PRIVATE NAGRA_FP_PRECISE ${AUDIO_DEFS})
 
 if(MSVC)
-    # MSVC CRT macros — target-private so FetchContent deps (SFML /
-    # ImGui / libsndfile / PortAudio / nlohmann_json / imgui-sfml) and
-    # audio-backend targets don't inherit them. WIN32_LEAN_AND_MEAN in
-    # particular strips the windows.h surface that SFML's SleepImpl.cpp
-    # (needs TIMECAPS / timeGetDevCaps from mmsystem.h) and
-    # SFML/Main/MainWin32.cpp (needs MSVC's __argc / __argv CRT globals)
-    # depend on; propagating it broke Windows CI builds.
+    # MSVC CRT macros + math-constants feature-test macro — target-private
+    # so FetchContent deps (SFML / ImGui / libsndfile / PortAudio /
+    # nlohmann_json / imgui-sfml) and audio-backend targets don't inherit
+    # them. WIN32_LEAN_AND_MEAN in particular strips the windows.h surface
+    # that SFML's SleepImpl.cpp (needs TIMECAPS / timeGetDevCaps from
+    # mmsystem.h) and SFML/Main/MainWin32.cpp (needs MSVC's __argc /
+    # __argv CRT globals) depend on; propagating it broke Windows CI
+    # builds. _USE_MATH_DEFINES is required BEFORE any #include <cmath>
+    # for the POSIX-style `M_*` constants (used by include/dsp_types.hpp
+    # at lines 366/372/383/389 for M_SQRT2) to be visible under MSVC —
+    # without it those translates fail with `error C2065: 'M_SQRT2':
+    # undeclared identifier`. Defining it via /D (this target_compile_
+    # definitions call) lets it take effect before the first preprocessor
+    # pass, so any include order is fine.
     target_compile_definitions(CapstanVar PRIVATE
-        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES)
 endif()
 
 target_include_directories(CapstanVar PRIVATE
