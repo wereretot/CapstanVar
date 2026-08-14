@@ -24,6 +24,30 @@ endif()
 # ── FetchContent ──────────────────────────────────────────────────────────────
 include(FetchContent)
 
+option(CAPSTANVAR_VERBOSE_DEP_FETCH "Show FetchContent dependency download progress" ON)
+set(CAPSTANVAR_GIT_LOW_SPEED_LIMIT 1024 CACHE STRING "Bytes/second threshold for stalled dependency downloads")
+set(CAPSTANVAR_GIT_LOW_SPEED_TIME 30 CACHE STRING "Seconds below the low-speed threshold before Git aborts dependency downloads")
+
+if(CAPSTANVAR_VERBOSE_DEP_FETCH)
+    set(FETCHCONTENT_QUIET OFF CACHE BOOL "Show FetchContent population progress" FORCE)
+endif()
+
+set(CAPSTANVAR_FETCH_GIT_CONFIG
+    "http.lowSpeedLimit=${CAPSTANVAR_GIT_LOW_SPEED_LIMIT}"
+    "http.lowSpeedTime=${CAPSTANVAR_GIT_LOW_SPEED_TIME}"
+)
+
+macro(capstanvar_make_available)
+    foreach(dep ${ARGN})
+        string(TOLOWER "${dep}" dep_lower)
+        FetchContent_GetProperties(${dep})
+        if(NOT ${dep_lower}_POPULATED)
+            message(STATUS "Dependency ${dep}: fetching/populating with FetchContent")
+        endif()
+        FetchContent_MakeAvailable(${dep})
+    endforeach()
+endmacro()
+
 # SFML 2.6.2
 set(SFML_BUILD_AUDIO    OFF CACHE BOOL "" FORCE)
 set(SFML_BUILD_NETWORK  OFF CACHE BOOL "" FORCE)
@@ -35,6 +59,8 @@ FetchContent_Declare(SFML
     GIT_REPOSITORY https://github.com/SFML/SFML.git
     GIT_TAG        2.6.2
     GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
 )
 
 # Dear ImGui 1.89.9 (compatible with imgui-sfml 2.6.x)
@@ -42,6 +68,8 @@ FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
     GIT_TAG        v1.89.9
     GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
 )
 
 # ImGui-SFML — pinned to exact commit on 2.6.x branch (SFML 2 compatible)
@@ -51,6 +79,8 @@ FetchContent_Declare(imgui_sfml
     GIT_REPOSITORY https://github.com/SFML/imgui-sfml.git
     GIT_TAG        64e09feda29266572799e5ded66eac5cb0a749aa
     GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
 )
 
 # nlohmann/json
@@ -58,6 +88,8 @@ FetchContent_Declare(nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG        v3.11.3
     GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
 )
 
 # libsndfile
@@ -74,12 +106,14 @@ FetchContent_Declare(libsndfile
     GIT_REPOSITORY https://github.com/libsndfile/libsndfile.git
     GIT_TAG        1.2.2
     GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
 )
 
 # Fetch SFML + imgui first, then imgui-sfml (needs IMGUI_DIR)
-FetchContent_MakeAvailable(SFML imgui)
+capstanvar_make_available(SFML imgui)
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
-FetchContent_MakeAvailable(imgui_sfml nlohmann_json libsndfile)
+capstanvar_make_available(imgui_sfml nlohmann_json libsndfile)
 
 # ── Audio backend selection ───────────────────────────────────────────────────
 # Priority: system PortAudio → ALSA (Linux) → CoreAudio stub (macOS) → WinMM (Windows)

@@ -33,6 +33,12 @@ NagraApp (ui.cpp)          ← ImGui + SFML window, all UI panels
 
 Plus **tinyfiledialogs** (single `.h` + `.c` file, bundled in project root).
 
+The first CMake configure needs GitHub access while `FetchContent` clones the
+dependencies. If configure appears to pause right after compiler feature
+detection, it is usually fetching `SFML` first. Re-run CMake with normal
+terminal output visible and check for `Dependency SFML: fetching/populating
+with FetchContent`.
+
 ---
 
 ## Build on Linux
