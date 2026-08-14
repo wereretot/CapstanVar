@@ -162,6 +162,16 @@ elseif(WIN32)
     set(AUDIO_DEFS   NAGRA_AUDIO_WINMM)
 endif()
 
+# Portable thread abstraction. Threads::Threads maps to libpthread.so on
+# Linux glibc, libSystem (bundled) on macOS, and a no-op stub on MSVC
+# where std::thread is built into the runtime. The previous literal
+# `pthread` link in target_link_libraries was correct on Linux/macOS but
+# caused `fatal error LNK1181: cannot open input file 'pthread.lib'` on
+# MSVC — there is no pthread library on Windows. Threads::Threads is the
+# canonical CMake idiom for this and is now the source of the actual
+# link dependency.
+find_package(Threads REQUIRED)
+
 # ── Sources ───────────────────────────────────────────────────────────────────
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -232,7 +242,7 @@ target_link_libraries(CapstanVar PRIVATE
     nlohmann_json::nlohmann_json
     SndFile::sndfile
     ${AUDIO_LIBS}
-    pthread
+    Threads::Threads
 )
 
 if(WIN32)
