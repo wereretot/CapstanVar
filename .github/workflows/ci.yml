@@ -7,6 +7,30 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Explicit `permissions:` tightens the workflow token from GitHub's
+# actual default. The default `GITHUB_TOKEN` is `contents: read` and
+# `actions: read` (NOT write) plus ~10 unrelated write scopes it
+# carries for non-build-action use (`checks`, `deployments`,
+# `discussions`, `issues`, `packages`, `pages`, `pull-requests`,
+# `repository-projects`, `security-events`, `statuses`) -- under
+# explicit-permissions semantics any unlisted scope collapses to
+# `none`, and that denial is the point of this block. The two scopes
+# ci.yml actually needs:
+#   contents: read   -- actions/checkout@v4 (matches the default;
+#                       listed here explicitly for clarity, not to
+#                       narrow further)
+#   actions: write   -- actions/cache@v4 + actions/upload-artifact@v4.
+#                       Artifact storage API lives behind `actions:`,
+#                       NOT `contents:`. The default's `actions: read`
+#                       is insufficient for the write side, so this
+#                       block upgrades that scope.
+# placement mirrors release.yml's; release.yml uses `contents: write`
+# because softprops/action-gh-release@v2 needs it to publish a
+# GitHub Release, which ci.yml's matrix does not.
+permissions:
+  contents: read
+  actions: write
+
 # Cancel in-progress runs of the same branch / PR so a rapid-fire push
 # sequence doesn't pile up redundant full-network FetchContent rebuilds.
 concurrency:
