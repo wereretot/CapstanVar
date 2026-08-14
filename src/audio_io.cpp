@@ -346,7 +346,14 @@ void AudioIO::_dsp_thread() {
         if (std::abs(cur) < 0.002f) {
             _engine.is_playing.store(false);
             std::fill(interleaved.begin(), interleaved.end(), 0.f);
-            _write_block(interleaved.data(), BLOCK_SIZE);
+            // If the audio backend init failed earlier (_backend == nullptr),
+            // _write_block returns false every iteration. Without this
+            // sleep_for fallback the loop would spin at 100% CPU pinning a
+            // core and starving the UI thread. Pace ourselves to one block's
+            // worth of wall-clock audio so responsive normalisation kicks
+            // back in as soon as the backend recovers.
+            if (!_write_block(interleaved.data(), BLOCK_SIZE))
+                std::this_thread::sleep_for(std::chrono::microseconds((long long)(BLOCK_SIZE * 1000000LL / SR)));
             continue;
         }
 
@@ -364,7 +371,13 @@ void AudioIO::_dsp_thread() {
             _target_speed.store(0.f);
             _engine.is_playing.store(false);
             std::fill(interleaved.begin(), interleaved.end(), 0.f);
-            _write_block(interleaved.data(), BLOCK_SIZE);
+            // Same sleep_for fallback as the stopped path: on a backend-less
+            // machine the loop otherwise chews through EOF cycling at 100%
+            // CPU and the rash of CV_ERR/EOF notifications hides the real
+            // root cause. The block-duration sleep keeps the loop bounded
+            // and lets the UI thread pre-empt normally.
+            if (!_write_block(interleaved.data(), BLOCK_SIZE))
+                std::this_thread::sleep_for(std::chrono::microseconds((long long)(BLOCK_SIZE * 1000000LL / SR)));
             continue;
         }
 
@@ -432,7 +445,14 @@ void AudioIO::_dsp_thread() {
         _level_left.store(_level_peak_l);
         _level_right.store(_level_peak_r);
 
-        _write_block(interleaved.data(), BLOCK_SIZE);
+        // Sleep fallback applies on the success path too: the backend can
+        // be opened but degrade mid-track (e.g. USB headset yanked, ALSA
+        // device hot-unplugged). _write_block returning false in that case
+        // shouldn't pin a core; pacing at one block duration keeps the
+        // engine honest until the user gets the failure surfaced via the
+        // notification panel rather than via a pegged CPU.
+        if (!_write_block(interleaved.data(), BLOCK_SIZE))
+            std::this_thread::sleep_for(std::chrono::microseconds((long long)(BLOCK_SIZE * 1000000LL / SR)));
     }
 
     _engine.is_playing.store(false);
