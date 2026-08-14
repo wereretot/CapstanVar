@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs of the same branch / PR so a rapid-fire push
+# sequence doesn't pile up redundant full-network FetchContent rebuilds.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────
+  # Windows / MSVC 2022
+  # ───────────────────────────────────────────────────────────────────────
+  windows-msvc:
+    name: Windows / MSVC 2022
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pulls MSVC 17 2022 (or whichever is selected) into PATH for the
+      # remainder of the job. arches available: x64, x86, arm64.
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Cache FetchContent dep sources + dep builds so subsequent CI runs
+      # skip the ~5–8 min SFML/ImGui/libsndfile/PortAudio/nlohmann_json
+      # recompile. The cache key is keyed on `runner.os` + a SHA-256 of
+      # just the GIT_TAG lines in CMakeLists.txt (extracted by grep) so
+      # any change to a pinned dep version invalidates the cache while
+      # unrelated CMakeLists edits (comments, flags, ordering) keep the
+      # cache hot. Restore-keys gives a prefix match so a returning-to-
+      # god-knows-what-older-tag still gets *some* cached deps rather
+      # than a full network rebuild.
+      - name: Compute FetchContent dep fingerprint
+        id: deps
+        shell: bash
+        run: |
+          # Python is in every GitHub Actions runner image (Linux / macOS / Windows);
+          # avoids depending on GNU coreutils' sha256sum being present on macOS-14
+          # (BSD userland ships `shasum`, not `sha256sum`, and coreutils is only
+          # installed if something else pulls it in via Homebrew).
+          python3 -c "
+          import hashlib, re
+          tags = re.findall(r'GIT_TAG[\\t ]+([A-Za-z0-9._+-]+)',
+                            open('CMakeLists.txt').read())
+          print('fingerprint=' + hashlib.sha256('\\n'.join(sorted(tags)).encode()).hexdigest())
+          " >> "$GITHUB_OUTPUT"
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fetchcontent
+          key: fetchcontent-${{ runner.os }}-${{ steps.deps.outputs.fingerprint }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
+
+      # The Visual Studio generator is used here rather than Ninja because
+      # MSVC + Ninja occasionally mis-handles FetchContent's per-dep CMake
+      # re-invocations on Windows runners; the VS generator is the most
+      # idiomatic and is the same one the README documents for end users.
+      # FETCHCONTENT_BASE_DIR points to the cached path above so source +
+      # dep builds are restored across CI runs.
+      - name: Configure (Visual Studio 17 2022 / x64 / Release)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release "-DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.fetchcontent"
+
+      - name: Build (Release)
+        run: cmake --build build --config Release -- -maxcpucount
+
+      # Bash shell so we can use the Unix-style `./build/Release/...` path
+      # convention. The .exe suffix and argv still flow through to the
+      # WinMain entry point correctly.
+      - name: Smoke test (./CapstanVar.exe --verify)
+        shell: bash
+        run: ./build/Release/CapstanVar.exe --verify
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Linux / GCC (Ubuntu 22.04)
+  # ───────────────────────────────────────────────────────────────────────
+  linux-gcc:
+    name: Linux / GCC
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # All native headers/libs the CMakeLists touches on Linux:
+      #   - libasound2-dev      → find_package(ALSA REQUIRED)
+      #   - libx{11,randr,cursor} / libgl / freetype / udev → SFML X11 + GL
+      #   - libpthread-stubs    → Threads::Threads (harmless)
+      #   - pkg-config          → optional PortAudio detection path
+      - name: Install native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build cmake g++ pkg-config \
+            libasound2-dev \
+            libx11-dev libxrandr-dev libxcursor-dev \
+            libgl-dev libfreetype-dev libudev-dev \
+            libpthread-stubs0-dev
+
+      # Cache FetchContent dep sources + dep builds so subsequent CI runs
+      # skip the ~5–8 min SFML/ImGui/libsndfile/PortAudio/nlohmann_json
+      # recompile. The cache key is keyed on `runner.os` + a SHA-256 of
+      # just the GIT_TAG lines in CMakeLists.txt (extracted by grep) so
+      # any change to a pinned dep version invalidates the cache while
+      # unrelated CMakeLists edits (comments, flags, ordering) keep the
+      # cache hot. Restore-keys gives a prefix match so a returning-to-
+      # god-knows-what-older-tag still gets *some* cached deps rather
+      # than a full network rebuild.
+      - name: Compute FetchContent dep fingerprint
+        id: deps
+        shell: bash
+        run: |
+          # Python is in every GitHub Actions runner image (Linux / macOS / Windows);
+          # avoids depending on GNU coreutils' sha256sum being present on macOS-14
+          # (BSD userland ships `shasum`, not `sha256sum`, and coreutils is only
+          # installed if something else pulls it in via Homebrew).
+          python3 -c "
+          import hashlib, re
+          tags = re.findall(r'GIT_TAG[\\t ]+([A-Za-z0-9._+-]+)',
+                            open('CMakeLists.txt').read())
+          print('fingerprint=' + hashlib.sha256('\\n'.join(sorted(tags)).encode()).hexdigest())
+          " >> "$GITHUB_OUTPUT"
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fetchcontent
+          key: fetchcontent-${{ runner.os }}-${{ steps.deps.outputs.fingerprint }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
+
+      - name: Configure (Ninja / Release)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.fetchcontent"
+
+      - name: Build (Release)
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Smoke test (./CapstanVar --verify)
+        run: ./build/CapstanVar --verify
+
+  # ───────────────────────────────────────────────────────────────────────
+  # macOS / Apple Clang (macos-14 ARM64)
+  # ───────────────────────────────────────────────────────────────────────
+  macos-apple-clang:
+    name: macOS / Apple Clang
+    runs-on: macos-14
+    timeout-minutes: 45
+    # Homebrew on Apple Silicon (macos-14) is at /opt/homebrew; the
+    # macos-14 image already puts it on PATH.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # macOS provides CoreAudio / CoreFoundation / AudioUnit as system
+      # frameworks via /Applications/Xcode*.app, so no apt/brew audio
+      # headers are needed. cmake and ninja are pre-installed on the
+      # macos-14 image; we install only `ninja` to pull the latest
+      # patched release and skip `brew update` (which adds ~30–60 s
+      # for no benefit on a pre-installed image).
+      - name: Install build tools
+        run: brew install ninja
+
+      # Cache FetchContent dep sources + dep builds so subsequent CI runs
+      # skip the ~5–8 min SFML/ImGui/libsndfile/PortAudio/nlohmann_json
+      # recompile. The cache key is keyed on `runner.os` + a SHA-256 of
+      # just the GIT_TAG lines in CMakeLists.txt (extracted by grep) so
+      # any change to a pinned dep version invalidates the cache while
+      # unrelated CMakeLists edits (comments, flags, ordering) keep the
+      # cache hot. Restore-keys gives a prefix match so a returning-to-
+      # god-knows-what-older-tag still gets *some* cached deps rather
+      # than a full network rebuild.
+      - name: Compute FetchContent dep fingerprint
+        id: deps
+        shell: bash
+        run: |
+          # Python is in every GitHub Actions runner image (Linux / macOS / Windows);
+          # avoids depending on GNU coreutils' sha256sum being present on macOS-14
+          # (BSD userland ships `shasum`, not `sha256sum`, and coreutils is only
+          # installed if something else pulls it in via Homebrew).
+          python3 -c "
+          import hashlib, re
+          tags = re.findall(r'GIT_TAG[\\t ]+([A-Za-z0-9._+-]+)',
+                            open('CMakeLists.txt').read())
+          print('fingerprint=' + hashlib.sha256('\\n'.join(sorted(tags)).encode()).hexdigest())
+          " >> "$GITHUB_OUTPUT"
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fetchcontent
+          key: fetchcontent-${{ runner.os }}-${{ steps.deps.outputs.fingerprint }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
+
+      - name: Configure (Ninja / Release)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.fetchcontent"
+
+      - name: Build (Release)
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Smoke test (./CapstanVar --verify)
+        run: ./build/CapstanVar --verify

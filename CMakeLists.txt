@@ -15,10 +15,21 @@ endif()
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
 if(MSVC)
-    add_compile_options(/O2 /W4 /MP /arch:AVX2)
+    # /arch:AVX2 enables AVX2 codegen without enabling fast-math — strict
+    # IEEE-754 is MSVC's default; /fp:precise pinned for symmetry with the
+    # non-MSVC NAGRA_FP_PRECISE target define further down.
+    add_compile_options(/O2 /W4 /MP /arch:AVX2 /fp:precise)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
-    add_compile_options(-O3 -march=native -Wall -Wextra -ffast-math)
+    # No -ffast-math: the in-process verify_* smoke tests used by CI
+    # (./CapstanVar --verify, see .github/workflows/ci.yml) require strict
+    # IEEE-754 semantics. See docs/TAPE_PHYSICS_REFACTOR.md §X. NAGRA_FP_PRECISE
+    # is scoped to this target further down (target_compile_definitions
+    # PRIVATE) so FetchContent deps don't accidentally inherit it.
+    # Note: -march=native is preserved here because CI runners are
+    # Skylake-or-newer — switch to -march=x86-64-v3 (Haswell baseline)
+    # before redistributing binaries.
+    add_compile_options(-O3 -march=native -Wall -Wextra)
 endif()
 
 # ── FetchContent ──────────────────────────────────────────────────────────────
@@ -177,7 +188,10 @@ endif()
 
 add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES})
 
-target_compile_definitions(CapstanVar PRIVATE ${AUDIO_DEFS})
+# Forward-compat hook for precision-sensitive DSP code (env module is the
+# expected first consumer). Defined target-scoped so FetchContent deps
+# (SFML / ImGui / PortAudio / libsndfile / nlohmann_json) don't inherit it.
+target_compile_definitions(CapstanVar PRIVATE NAGRA_FP_PRECISE ${AUDIO_DEFS})
 
 target_include_directories(CapstanVar PRIVATE
     include/

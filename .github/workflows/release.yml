@@ -1,0 +1,290 @@
+name: Release
+
+# Triggered on tag pushes matching `v*` (e.g. v1.0.0, v0.4.2-rc1). The
+# three platform build jobs run in parallel; the release-publish job
+# consumes their uploaded artifacts and uses softprops/action-gh-release@v2
+# to attach them to a single GitHub Release for the tag.
+on:
+  push:
+    tags: ['v*']
+
+# softprops/action-gh-release needs `contents: write` to publish a release
+# via the default GITHUB_TOKEN. Set explicitly at workflow level so the
+# permission requirement is visible in the YAML — repo admins who enforce
+# read-only GITHUB_TOKEN can see at a glance why this workflow needs it.
+permissions:
+  contents: write
+
+# Inherit the same FetchContent cache as the CI matrix workflow — keys are
+# identical (os + dep-pin SHA-256 fingerprint) so a tag build immediately
+# benefits from any successful PR's cached deps on the matching runner OS.
+#
+# `cancel-in-progress: false` is deliberate for a release workflow: if a
+# maintainer re-tags (force-push `v1.0.0`) mid-flight, cancelling the
+# previous three build jobs + release-publish would leave an orphan artifact
+# set on the last-cancelled job and a half-published GitHub Release. Better
+# to let the previous release run to completion and have softprops fail on
+# the tag-already-has-a-release conflict, which the maintainer can retry
+# after deleting the draft.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────
+  # Windows / MSVC 2022
+  # ───────────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build (Windows / MSVC 2022)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Compute FetchContent dep fingerprint
+        id: deps
+        shell: bash
+        run: |
+          python3 -c "
+          import hashlib, re
+          tags = re.findall(r'GIT_TAG[\\t ]+([A-Za-z0-9._+-]+)',
+                            open('CMakeLists.txt').read())
+          print('fingerprint=' + hashlib.sha256('\\n'.join(sorted(tags)).encode()).hexdigest())
+          " >> "$GITHUB_OUTPUT"
+
+      # Same cache key as ci.yml so PR builds and tag builds share the cache.
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fetchcontent
+          key: fetchcontent-${{ runner.os }}-${{ steps.deps.outputs.fingerprint }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
+
+      - name: Configure (Visual Studio 17 2022 / x64 / Release)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release "-DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.fetchcontent"
+
+      - name: Build (Release)
+        run: cmake --build build --config Release -- -maxcpucount
+
+      - name: Smoke test (./CapstanVar.exe --verify)
+        shell: bash
+        run: ./build/Release/CapstanVar.exe --verify
+
+      - name: Upload `CapstanVar.exe` artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapstanVar.exe
+          path: build/Release/CapstanVar.exe
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Linux / GCC (Ubuntu 22.04)
+  # ───────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build (Linux / GCC)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build cmake g++ pkg-config \
+            libasound2-dev \
+            libx11-dev libxrandr-dev libxcursor-dev \
+            libgl-dev libfreetype-dev libudev-dev \
+            libpthread-stubs0-dev
+
+      - name: Compute FetchContent dep fingerprint
+        id: deps
+        shell: bash
+        run: |
+          python3 -c "
+          import hashlib, re
+          tags = re.findall(r'GIT_TAG[\\t ]+([A-Za-z0-9._+-]+)',
+                            open('CMakeLists.txt').read())
+          print('fingerprint=' + hashlib.sha256('\\n'.join(sorted(tags)).encode()).hexdigest())
+          " >> "$GITHUB_OUTPUT"
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fetchcontent
+          key: fetchcontent-${{ runner.os }}-${{ steps.deps.outputs.fingerprint }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
+
+      - name: Configure (Ninja / Release)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.fetchcontent"
+
+      - name: Build (Release)
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Smoke test (./CapstanVar --verify)
+        run: ./build/CapstanVar --verify
+
+      - name: Upload `CapstanVar-linux` artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapstanVar-linux
+          path: build/CapstanVar
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────
+  # macOS / Apple Clang (macos-14 ARM64)
+  # ───────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build (macOS / Apple Clang)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install ninja
+
+      - name: Compute FetchContent dep fingerprint
+        id: deps
+        shell: bash
+        run: |
+          python3 -c "
+          import hashlib, re
+          tags = re.findall(r'GIT_TAG[\\t ]+([A-Za-z0-9._+-]+)',
+                            open('CMakeLists.txt').read())
+          print('fingerprint=' + hashlib.sha256('\\n'.join(sorted(tags)).encode()).hexdigest())
+          " >> "$GITHUB_OUTPUT"
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fetchcontent
+          key: fetchcontent-${{ runner.os }}-${{ steps.deps.outputs.fingerprint }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-
+
+      - name: Configure (Ninja / Release)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.fetchcontent"
+
+      - name: Build (Release)
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Smoke test (./CapstanVar --verify)
+        run: ./build/CapstanVar --verify
+
+      # Wrap the binary in a minimal CapstanVar.app bundle so Finder
+      # shows the app icon, the launcher treats it as a GUI app, and end
+      # users get a double-clickable artefact. The Info.plist is the bare
+      # minimum Apple needs to register the app. SFML / PortAudio / libsndfile
+      # dylib bundling (install_name_tool + Contents/Frameworks/) is NOT
+      # done here — see followup backlog for that hardening step.
+      - name: Bundle CapstanVar.app with Info.plist
+        run: |
+          set -e
+          rm -rf CapstanVar.app CapstanVar.app.tar.gz
+          mkdir -p CapstanVar.app/Contents/MacOS
+          cp build/CapstanVar CapstanVar.app/Contents/MacOS/CapstanVar
+          chmod +x CapstanVar.app/Contents/MacOS/CapstanVar
+          # Sanitize tag → Info.plist's CFBundleVersion which Apple
+          # requires to be `numeric` or `A.B[.C]` (no `-`, no letters).
+          # Truncate any trailing non-numeric suffix (so a `-rc1` / `-beta2`
+          # prerelease tag still produces a usable version):
+          #   v1.0.0       → 1.0.0
+          #   v1.0.0-rc1   → 1.0.0
+          #   v1.2.3.4-rc1 → 1.2.3
+          # Fall back to 0.0.0 only when the tag has no numeric prefix at all.
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" =~ ^([0-9]+(\.[0-9]+){0,2}) ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            VERSION="0.0.0"
+          fi
+          cat > CapstanVar.app/Contents/Info.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>CapstanVar</string>
+              <key>CFBundleIdentifier</key><string>com.example.capstanvar</string>
+              <key>CFBundleName</key><string>CapstanVar</string>
+              <key>CFBundleDisplayName</key><string>CapstanVar</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+              <key>CFBundleVersion</key><string>${VERSION}</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>NSPrincipalClass</key><string>NSApplication</string>
+          </dict>
+          </plist>
+          EOF
+          tar czf CapstanVar.app.tar.gz CapstanVar.app
+
+      # Both macOS artefacts are intentional, not redundancy:
+      #   CapstanVar-darwin  → raw binary for CLI use / package-manager installs /
+      #                       users who'll run ./CapstanVar themselves from $PATH.
+      #   CapstanVar.app.tar.gz (next step) → Finder-launchable bundle for
+      #                       double-click GUI use.
+      # The `CapstanVar-darwin` name (rather than bare `CapstanVar`) avoids a
+      # same-name collision with the Linux artefact when both platform
+      # binaries are downloaded into the same dir.
+      - name: Upload `CapstanVar-darwin` artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapstanVar-darwin
+          path: build/CapstanVar
+          if-no-files-found: error
+
+      - name: Upload `CapstanVar.app.tar.gz` artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapstanVar.app.tar.gz
+          path: CapstanVar.app.tar.gz
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Attach all three artefacts to a single GitHub Release for the tag.
+  # Depends on the three build jobs so a release is only ever created when
+  # the smoke test passes on all three platforms.
+  # ───────────────────────────────────────────────────────────────────────
+  release-publish:
+    name: Publish GitHub Release with all artifacts
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Verify downloaded artifacts
+        run: |
+          find release-assets -maxdepth 2 -type f -printf '%p (%s bytes)\n'
+
+      # softprops/action-gh-release@v2:
+      #   tag_name    : the tag that triggered this run (e.g. v1.0.0)
+      #   name        : human-readable title of the Release
+      #   generate_release_notes: PR-driven release notes auto-generated
+      #   files       : relative paths to attach as Release assets (basenames
+      #                 preserved on the resulting GitHub Release page)
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CapstanVar ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/CapstanVar.exe/CapstanVar.exe
+            release-assets/CapstanVar-linux/CapstanVar
+            release-assets/CapstanVar-darwin/CapstanVar
+            release-assets/CapstanVar.app.tar.gz/CapstanVar.app.tar.gz
