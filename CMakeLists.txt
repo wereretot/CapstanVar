@@ -147,10 +147,64 @@ FetchContent_Declare(libsndfile
     GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
 )
 
+# libopus + libopusfile -- native .opus decoding fallback path.
+# libsndfile 1.2.x with ENABLE_EXTERNAL_LIBS=OFF (the d57fdcf bundled-codec
+# config) does NOT bundle an Opus decoder, so .opus files cannot be decoded
+# by the libsndfile path alone. libopusfile 0.12 is the canonical native
+# decoder for Opus-in-Ogg streams; it depends on libopus + libogg (both
+# fetched transitively when libopusfile's own CMakeLists runs). Tags use
+# xiph's `v`-prefix convention (verified at github.com/xiph/libopus/tags
+# and libopusfile/tags -- the `libopusfile-0.12` form used in package
+# manager labels is the same tag, just with a vendor prefix). The
+# OPUSFILE_BUILD_HTTP=OFF option drops the optional curl + openssl dep
+# that libopusfile uses for URL-streamed ogg: opus sources -- CapstanVar
+# only opens local files via std::ifstream, so the network codepath can
+# be excluded and we avoid carrying OpenSSL into the Linux CI runner.
+set(OPUS_BUILD_TESTING           OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS          OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(libopus
+    GIT_REPOSITORY https://github.com/xiph/libopus.git
+    GIT_TAG        v1.5.2
+    GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
+)
+
+set(OPUSFILE_BUILD_TESTING       OFF CACHE BOOL "" FORCE)
+set(OPUSFILE_BUILD_PROGRAMS      OFF CACHE BOOL "" FORCE)
+set(OPUSFILE_BUILD_HTTP          OFF CACHE BOOL "" FORCE) # strip curl + openssl dep
+FetchContent_Declare(libopusfile
+    GIT_REPOSITORY https://github.com/xiph/libopusfile.git
+    GIT_TAG        v0.12
+    GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_CONFIG     ${CAPSTANVAR_FETCH_GIT_CONFIG}
+)
+
 # Fetch SFML + imgui first, then imgui-sfml (needs IMGUI_DIR)
 capstanvar_make_available(SFML imgui)
 set(IMGUI_DIR ${imgui_SOURCE_DIR})
-capstanvar_make_available(imgui_sfml nlohmann_json libsndfile)
+capstanvar_make_available(imgui_sfml nlohmann_json libsndfile libopus libopusfile)
+
+# xiph/libopusfile exposes target `opusfile` but exposes no `opusfile::opusfile`
+# namespaced alias. Add one here so the project's target_link_libraries can
+# write `opusfile::opusfile` consistent with libsndfile's `SndFile::sndfile`
+# form. Idempotent on re-runs (CMake re-runs at configure time) and on future
+# libopusfile versions that may start shipping the alias themselves.
+if(TARGET opusfile AND NOT TARGET opusfile::opusfile)
+    add_library(opusfile::opusfile ALIAS opusfile)
+endif()
+
+if(MSVC)
+    # xiph's MSVC-side sources (snprintf, strncpy, strcpy, fopen, etc.)
+    # need the C4996 deprecation warning suppressed to compile cleanly
+    # under MSVC 2022 default warning level. _CRT_SECURE_NO_WARNINGS
+    # is applied PRIVATE to each fetched target so it doesn't leak into
+    # CapstanVar's own translation units (which would break the
+    # target-private scope we lock it to further down in this file).
+    target_compile_definitions(opusfile PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(opus    PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # ── Audio backend selection ───────────────────────────────────────────────────
 # Priority: system PortAudio → ALSA (Linux) → CoreAudio stub (macOS) → WinMM (Windows)
@@ -261,6 +315,8 @@ target_link_libraries(CapstanVar PRIVATE
     sfml-system
     nlohmann_json::nlohmann_json
     SndFile::sndfile
+    Opus::opus
+    opusfile::opusfile
     ${AUDIO_LIBS}
     Threads::Threads
 )
