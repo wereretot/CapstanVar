@@ -110,14 +110,34 @@ FetchContent_Declare(nlohmann_json
 )
 
 # libsndfile
-# Enable additional audio codecs: FLAC, Vorbis, Opus, etc.
+# Use libsndfile's bundled codec decoders (FLAC, Vorbis, MP3) rather than
+# the system packages so the CI artifact is self-contained and runs on
+# end-user machines that don't have libflac-dev / libvorbis-dev /
+# libmpg123-dev installed. With ENABLE_EXTERNAL_LIBS=ON (the libsndfile
+# default), libsndfile's CMake configure searches for system libFLAC,
+# libvorbis (and via libogg), and libmpg123 via pkg-config / find_package;
+# when those searches fail on runners that don't have the -dev packages
+# installed (Linux and Windows CI runners only ship ALSA / X11 / GL deps),
+# libsndfile prints "External lib X not found" warnings and proceeds with
+# an inconsistent fallback state. We've already observed that state on
+# CI runs as the runtime failure that the user reported: sf_open on .ogg
+# / .flac / .mp3 returning NULL despite the binary launching. Forcing
+# ENABLE_EXTERNAL_LIBS=OFF makes libsndfile build its own FLAC / Vorbis /
+# MP3 implementations from src/ and bake them into libsndfile's static
+# lib unconditionally -- the CI artefact then resolves all codec symbols
+# internally and decodes .ogg / .flac / .mp3 on user machines without
+# requiring apt / vcpkg / brew / MSI installs of codec dev packages.
+# ENABLE_MPEG stays ON because libsndfile has its own bundled MP3 decoder
+# independent of libmpg123 -- that flag gates whether the bundled path
+# gets compiled at all. ENABLE_EXPERIMENTAL is OFF (WavPack / SD2 /
+# old-Windows-only codecs are not needed by CapstanVar).
 set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING  OFF CACHE BOOL "" FORCE)
 set(ENABLE_CPACK   OFF CACHE BOOL "" FORCE)
-set(ENABLE_EXTERNAL_LIBS ON CACHE BOOL "" FORCE)  # Enable FLAC, Vorbis, Opus
-set(ENABLE_MPEG ON CACHE BOOL "" FORCE)           # Enable MP3 and other MPEG formats
-set(ENABLE_EXPERIMENTAL ON CACHE BOOL "" FORCE)   # Enable experimental codecs
+set(ENABLE_EXTERNAL_LIBS OFF CACHE BOOL "" FORCE)
+set(ENABLE_MPEG ON CACHE BOOL "" FORCE)           # bundled MP3 decoder
+set(ENABLE_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(libsndfile
     GIT_REPOSITORY https://github.com/libsndfile/libsndfile.git
