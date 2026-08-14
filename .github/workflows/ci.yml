@@ -82,6 +82,17 @@ jobs:
         shell: bash
         run: ./build/Release/CapstanVar.exe --verify
 
+      # Artifact name + retention mirror release.yml so the same SHA's CI
+      # and Release artefacts share identifiers in the GitHub UI.
+      # `if-no-files-found: error` fail-fasts the upload step instead of
+      # silently producing an empty artefact; matches release.yml's policy.
+      - name: Upload `CapstanVar.exe` artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapstanVar.exe
+          path: build/Release/CapstanVar.exe
+          if-no-files-found: error
+
   # ───────────────────────────────────────────────────────────────────────
   # Linux / GCC (Ubuntu 22.04)
   # ───────────────────────────────────────────────────────────────────────
@@ -148,6 +159,19 @@ jobs:
       - name: Smoke test (./CapstanVar --verify)
         run: ./build/CapstanVar --verify
 
+      # Mirror release.yml's `CapstanVar-linux` artefact name + `if-no-
+      # files-found: error` fail-fast. Path is `./build/CapstanVar` (Ninja
+      # single-config layout), NOT `./build/Release/CapstanVar` — different
+      # from Windows below because the Linux/macOS jobs use the Ninja
+      # single-config generator and emit binaries at the top of `build/`
+      # rather than under `build/${CMAKE_BUILD_TYPE}/`.
+      - name: Upload `CapstanVar-linux` artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapstanVar-linux
+          path: build/CapstanVar
+          if-no-files-found: error
+
   # ───────────────────────────────────────────────────────────────────────
   # macOS / Apple Clang (macos-14 ARM64)
   # ───────────────────────────────────────────────────────────────────────
@@ -209,3 +233,21 @@ jobs:
 
       - name: Smoke test (./CapstanVar --verify)
         run: ./build/CapstanVar --verify
+
+      # Mirror release.yml's `CapstanVar-darwin` artefact name + `if-no-files-
+      # found: error` fail-fast. ci.yml deliberately does NOT also upload a
+      # `CapstanVar.app.tar.gz` bundle here the way release.yml does — that's
+      # YAGNI rather than a hard technical blocker: the release.yml bundler
+      # would still produce a syntactically valid Info.plist with
+      # CFBundleVersion = "0.0.0" via its numeric-fallback on a non-tag ref.
+      # The real reason to skip is that release.yml already owns the bundle
+      # step (with dylib rewrites + Info.plist from a tag ref), and CI
+      # consumers want the raw binary for the `--verify` smoke test rather
+      # than a Finder-launchable shell. The .app bundle step belongs
+      # strictly in release.yml.
+      - name: Upload `CapstanVar-darwin` artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapstanVar-darwin
+          path: build/CapstanVar
+          if-no-files-found: error
