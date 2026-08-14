@@ -2,6 +2,15 @@
 #include "mod_environment.hpp"
 #include "preset_manager.hpp"
 #include <cstdio>
+#include <cstdlib>   // Belt-and-braces: declares MSVC's __argc / __argv CRT
+                      // globals that WinMain reads below. None of the other
+                      // headers here (<cstring>, <exception>, <new>, <string>)
+                      // reliably transit <stdlib.h>, so this is the
+                      // defensive anchor that keeps the Windows branch
+                      // working if a future transitive-include chain changes.
+                      // Same class of issue that broke SFML's MainWin32.cpp
+                      // (also a __argc/__argv undeclared error) under the
+                      // global WIN32_LEAN_AND_MEAN we used to set.
 #include <cstring>
 #include <exception>
 #include <new>

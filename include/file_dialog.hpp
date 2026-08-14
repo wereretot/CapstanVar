@@ -124,7 +124,14 @@ public:
         // ── Breadcrumbs ──────────────────────────────────────────────────────
         {
             fs::path acc; bool first = true;
-            for (auto& part : _current_dir) {
+            // `const auto&` (not `auto&`): std::filesystem::path::iterator
+            // yields iterator-proxy values per C++20 P0532R9. libstdc++
+            // currently permits `auto&` binding to the proxy as an
+            // extension; Apple libc++ enforces the standard literally
+            // and refuses. The loop body only reads `part`, so const-ref
+            // (which can bind to a temporary proxy) is the minimal-change
+            // cross-platform-compatible fix.
+            for (const auto& part : _current_dir) {
                 std::string s = part.string();
                 if (s.empty()) continue;
                 if (!first) { ImGui::SameLine(0,2); ImGui::TextUnformatted("/"); ImGui::SameLine(0,2); }

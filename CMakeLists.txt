@@ -19,7 +19,13 @@ if(MSVC)
     # IEEE-754 is MSVC's default; /fp:precise pinned for symmetry with the
     # non-MSVC NAGRA_FP_PRECISE target define further down.
     add_compile_options(/O2 /W4 /MP /arch:AVX2 /fp:precise)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    # Note: the three CRT macros _CRT_SECURE_NO_WARNINGS / NOMINMAX /
+    # WIN32_LEAN_AND_MEAN used to live here as a global add_compile_definitions
+    # call. They LEAKED into FetchContent deps and broke SFML's compile
+    # on Windows — SleepImpl.cpp needs full windows.h to find TIMECAPS /
+    # timeGetDevCaps from mmsystem.h, and MainWin32.cpp needs MSVC's
+    # __argc / __argv CRT globals (both unavailable under WIN32_LEAN_AND_MEAN).
+    # They are now set target-private further down.
 else()
     # No -ffast-math: the in-process verify_* smoke tests used by CI
     # (./CapstanVar --verify, see .github/workflows/ci.yml) require strict
@@ -192,6 +198,18 @@ add_executable(CapstanVar ${APP_SOURCES} ${IMGUI_SOURCES})
 # expected first consumer). Defined target-scoped so FetchContent deps
 # (SFML / ImGui / PortAudio / libsndfile / nlohmann_json) don't inherit it.
 target_compile_definitions(CapstanVar PRIVATE NAGRA_FP_PRECISE ${AUDIO_DEFS})
+
+if(MSVC)
+    # MSVC CRT macros — target-private so FetchContent deps (SFML /
+    # ImGui / libsndfile / PortAudio / nlohmann_json / imgui-sfml) and
+    # audio-backend targets don't inherit them. WIN32_LEAN_AND_MEAN in
+    # particular strips the windows.h surface that SFML's SleepImpl.cpp
+    # (needs TIMECAPS / timeGetDevCaps from mmsystem.h) and
+    # SFML/Main/MainWin32.cpp (needs MSVC's __argc / __argv CRT globals)
+    # depend on; propagating it broke Windows CI builds.
+    target_compile_definitions(CapstanVar PRIVATE
+        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 target_include_directories(CapstanVar PRIVATE
     include/
