@@ -18,7 +18,13 @@ bool TapeEngine::load_file(const std::string& path) {
     // Open StreamBuffer first — uses current stream.ring_frames, stream.ahead_frames,
     // stream.io_chunk_frames set by UI from PerfOptions
     if (!stream.open(path)) {
-        CV_ERR(FILE_OPEN_FAILED, path + ": StreamBuffer::open failed");
+        // StreamBuffer::open already posts its own FILE_OPEN_FAILED with the
+        // libsndile error context (e.g. "File contains data in an unimplemented
+        // format") plus the supported-formats hint. Without this suppression the
+        // user sees three stacked FILE_OPEN_FAILED notifications per attempt —
+        // atomically there is only one failure, the redundant copies just clutter
+        // the panel. Silence at this layer so the UI's notification post is
+        // paired with the StreamBuffer's detailed one rather than two of them.
         return false;
     }
 

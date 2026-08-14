@@ -40,7 +40,24 @@ public:
         SF_INFO info{};
         SNDFILE* sf = sf_open(path.c_str(), SFM_READ, &info);
         if (!sf) {
-            CV_ERR(FILE_OPEN_FAILED, path + ": " + sf_strerror(nullptr));
+            // sf_strerror(NULL) returns a string containing the most
+            // recent libsndfile error from the calling thread (the
+            // behaviour with NULL is implementation-defined in libsndle's
+            // public API contract — it threads through a last-error
+            // string in libsndle 1.2.x, with the practical effect of
+            // turning a NULL sf_open return into a human-readable cause
+            // such as "File contains data in an unimplemented format"
+            // when the file is in a format libsndle doesn't natively
+            // decode, vs "system error" when the path can't be read).
+            // sf_strerror returns a pointer into a libsndle-internal
+            // buffer; the surrounding std::string concatenation copies
+            // it into per-temporary storage immediately so there's no
+            // UAF risk on the construction chain.
+            CV_ERR(FILE_OPEN_FAILED,
+                path + ": " + sf_strerror(nullptr) +
+                " -- supported formats: WAV, AIFF, FLAC, OGG Vorbis, MP3"
+                " (Opus/WMA are not in libsndfile at all;"
+                " WavPack/SD2 are gated under ENABLE_EXPERIMENTAL=OFF in this build)");
             return false;
         }
         if (info.frames <= 0) { sf_close(sf); return false; }
